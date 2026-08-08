@@ -26,11 +26,11 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Tool } from "@earendil-works/pi-ai";
 import type { ExtensionContext, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { EXT_NAME, type CompactConfig } from "./config.ts";
-import { extractPayloadMeta, logRequest } from "../../request-logger/sink.ts";
+import { extractPayloadMeta, logRequest } from "./sink.ts";
 
 let loggerWarned = false;
 
@@ -176,6 +176,27 @@ function extractRecentFiles(branchEntries: unknown[], maxFiles: number): string[
 }
 
 /**
+ * 有界读取:最多读 maxChars 个字符(按 UTF-8 每字符 4 字节上限取字节数),
+ * 避免把超大文件整体读进内存(旧实现 readFileSync 无上限)。
+ * 返回截断标记:文件比读取的字节多(或解码后超过 maxChars)视为截断。
+ */
+function readFirstChars(path: string, maxChars: number): { text: string; truncated: boolean } {
+  const size = statSync(path).size;
+  if (size <= 0) return { text: "", truncated: false };
+  const bytes = Math.min(size, maxChars * 4);
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(bytes);
+    const read = readSync(fd, buf, 0, bytes, 0);
+    const text = buf.subarray(0, read).toString("utf8");
+    const truncated = read < size || text.length > maxChars;
+    return { text: text.slice(0, maxChars), truncated };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * Read file contents for the given paths, respecting a total token budget.
  * Files are truncated to `maxCharsPerFile`; the total is capped at `fileTokenBudget`
  * (chars/4 heuristic). Unreadable files are skipped. Returns a text block ready to
@@ -192,10 +213,10 @@ function readFileContents(paths: string[], cfg: CompactConfig): string {
       const size = statSync(p).size;
       if (size <= 0) continue;
       const limit = Math.min(cfg.maxCharsPerFile, totalBudgetChars - used);
-      const text = readFileSync(p, "utf8");
-      const sliced = text.length > limit ? text.slice(0, limit) + "\n[truncated]" : text;
-      used += sliced.length;
-      sections.push(`### ${p}\n${sliced}`);
+      const { text, truncated } = readFirstChars(p, limit);
+      if (!text) continue;
+      used += text.length;
+      sections.push(`### ${p}\n${text}${truncated ? "\n[truncated]" : ""}`);
     } catch {
       // unreadable/binary file - skip
     }
@@ -258,10 +279,10 @@ function readSkillContents(skillPaths: string[], cfg: CompactConfig): string {
       if (size <= 0) continue;
       const label = skillLabel(p);
       const limit = totalBudgetChars - used;
-      const text = readFileSync(p, "utf8");
-      const sliced = text.length > limit ? text.slice(0, limit) + "\n[truncated]" : text;
-      used += sliced.length;
-      sections.push(`### Skill: ${label}\n${sliced}`);
+      const { text, truncated } = readFirstChars(p, limit);
+      if (!text) continue;
+      used += text.length;
+      sections.push(`### Skill: ${label}\n${text}${truncated ? "\n[truncated]" : ""}`);
     } catch {
       // unreadable - skip
     }
