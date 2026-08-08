@@ -15,7 +15,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const REQUESTS_DIR = join(homedir(), ".pi", "agent", "requests");
+/** 请求日志根目录(惰性求值,便于测试用 HOME/USERPROFILE 重定向)。 */
+function requestsDir(): string {
+  return join(homedir(), ".pi", "agent", "requests");
+}
 
 let seq = 0;
 
@@ -46,7 +49,7 @@ export function logRequest(
   meta: Partial<RequestLogMeta> = {},
 ): void {
   try {
-    const dir = join(REQUESTS_DIR, cwdHash(cwd));
+    const dir = join(requestsDir(), cwdHash(cwd));
     mkdirSync(dir, { recursive: true });
     seq += 1;
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -64,7 +67,7 @@ export function logRequest(
       },
       payload,
     };
-    writeFileSync(file, JSON.stringify(doc, null, 2), "utf8");
+    writeFileSync(file, JSON.stringify(doc, null, 2), { encoding: "utf8", mode: 0o600 });
     console.info(
       `[cache-stack:sink] ${type} request body (${meta.messageCount ?? "?"} messages, ${meta.toolCount ?? "?"} tools) -> ${file}`,
     );

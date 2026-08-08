@@ -14,7 +14,7 @@
 
 import { Type } from "typebox";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_ALWAYS_ACTIVE, type LazyToolsConfig } from "./config.ts";
 
 export const PROXY_TOOL_NAME = "lazy";
@@ -124,6 +124,23 @@ function activateTools(state: LazyToolsState, names: string[]): { activated: str
   return { activated, missing };
 }
 
+/**
+ * 激活工具的精简 guidance(system_prompt_filter 只保留常驻工具,动态激活的
+ * 工具不会出现在 system prompt 里,所以把 description + promptGuidelines
+ * 写进 lazy 工具结果,让模型激活后仍能看到该工具的用法)。
+ */
+function describeActivatedTool(state: LazyToolsState, name: string): string {
+  const tool = state.knownTools.get(name);
+  if (!tool) return `- ${name}: (unknown tool)`;
+  const lines = [`- ${name}: ${tool.description ?? ""}`];
+  if (tool.promptGuidelines && tool.promptGuidelines.length > 0) {
+    for (const g of tool.promptGuidelines) {
+      lines.push(`    - ${g}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 function applyActiveTools(state: LazyToolsState): void {
   // The proxy tool must always stay active so the LLM can re-discover tools.
   // Defensive: keep the proxy even if getAllTools() ever stops listing it.
@@ -133,11 +150,11 @@ function applyActiveTools(state: LazyToolsState): void {
   state.pi.setActiveTools(valid);
 }
 
-function buildToolResult(state: LazyToolsState, text: string): AgentToolResult {
+function buildToolResult(state: LazyToolsState, text: string): AgentToolResult<unknown> {
   return {
     content: [{ type: "text", text }],
     details: { state: { alwaysActive: [...state.alwaysActive], activated: [...state.activated] } },
-  } as AgentToolResult;
+  } as AgentToolResult<unknown>;
 }
 
 export interface LazyToolsHooks {
@@ -193,9 +210,9 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig):
       _signal: AbortSignal | undefined,
       _onUpdate: unknown,
       _ctx: ExtensionContext,
-    ): Promise<AgentToolResult> {
+    ): Promise<AgentToolResult<unknown>> {
       if (!getCfg().enabled) {
-        return { content: [{ type: "text", text: DISABLED_TEXT }] } as AgentToolResult;
+        return { content: [{ type: "text", text: DISABLED_TEXT }] } as AgentToolResult<unknown>;
       }
       const state = ensureState();
       if (params.reset) {
@@ -208,6 +225,11 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig):
         const parts: string[] = [];
         if (activated.length > 0) {
           parts.push(`Activated: ${activated.join(", ")} (available next turn)`);
+          parts.push("");
+          parts.push("Tool guidance:");
+          for (const name of activated) {
+            parts.push(describeActivatedTool(state, name));
+          }
         } else {
           parts.push("Nothing new activated.");
         }
@@ -239,7 +261,7 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig):
 
   pi.registerCommand("lazy", {
     description: "Show lazy-tools status: active set, request-body cost, and how to activate tools",
-    handler: async (args: string | undefined, ctx: { hasUI: boolean; ui: { notify: (msg: string, level?: string) => void } }) => {
+    handler: async (args: string | undefined, ctx: ExtensionCommandContext) => {
       if (!getCfg().enabled) {
         if (ctx.hasUI) {
           ctx.ui.notify(DISABLED_TEXT, "info");
@@ -281,12 +303,31 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig):
 
   return {
     onSessionStart(): void {
-      if (!getCfg().enabled) return;
-      // 幂等:session_start 可能重复触发(startup/resume/reload 各路径),重复应用无副作用。
-      if (!state) {
-        state = createState(pi, getCfg());
+      const cfg = getCfg();
+      if (!cfg.enabled) {
+        // 从启用切到禁用:恢复全量工具集(pi 默认行为),而不是继续停留在裁剪集。
+        if (state) {
+          refreshKnownTools(state);
+          state.activated.clear();
+          state.alwaysActive = new Set(state.knownTools.keys());
+          applyActiveTools(state);
+        }
+        // 从未启用过:pi 默认就是全量激活,无需干预。
+        return;
       }
+      if (!state) {
+        state = createState(pi, cfg);
+      }
+      // reconcile:每次都按当前配置重建 alwaysActive(合并语义,不能删核心工具),
+      // 并清掉已不存在工具的会话激活。配置变更(alwaysActive/enabled)在
+      // session_start(以及 index.ts 的 reload)时生效,无需重启。
+      const configured = cfg.alwaysActive && cfg.alwaysActive.length > 0 ? cfg.alwaysActive : [];
+      state.alwaysActive = new Set([...DEFAULT_ALWAYS_ACTIVE, ...configured]);
       refreshKnownTools(state);
+      const known = new Set(state.knownTools.keys());
+      for (const name of [...state.activated]) {
+        if (!known.has(name)) state.activated.delete(name);
+      }
       applyActiveTools(state);
     },
     onToolExecutionEnd(): void {

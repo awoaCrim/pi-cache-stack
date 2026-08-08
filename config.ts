@@ -38,6 +38,8 @@ export interface CompactConfig {
   maxTokens: number;
   summaryReasoning: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
   keepSystemPrompt: boolean;
+  /** 把 compact 请求体(messages/tools 全文,可能含敏感内容)落盘到 request-logger 目录。 */
+  logRequests: boolean;
   injectRecentFiles: boolean;
   maxRecentFiles: number;
   fileTokenBudget: number;
@@ -65,18 +67,19 @@ export const DEFAULT_CONFIG: CacheStackConfig = {
      */
     summaryReasoning: "off",
     keepSystemPrompt: true,
+    logRequests: true,
     /** Re-inject the content of recently touched files into the summary (Claude Code-style). */
     injectRecentFiles: true,
     /** Max number of distinct files to re-inject. */
     maxRecentFiles: 5,
-    /** Total budget (tokens) for re-injected file content. */
-    fileTokenBudget: 20000,
+    /** Total budget (tokens) for re-injected file content. Keep modest: reinjecting too much defeats compaction. */
+    fileTokenBudget: 12000,
     /** Max chars read per file (guard against huge files). */
-    maxCharsPerFile: 60000,
+    maxCharsPerFile: 40000,
     /** Re-inject the full content of skills that were loaded via read during the session. */
     injectLoadedSkills: true,
     /** Total budget (tokens) for re-injected skill content. */
-    skillTokenBudget: 25000,
+    skillTokenBudget: 12000,
   },
 };
 
@@ -88,8 +91,9 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * 深合并:override 覆盖 base 的标量/数组(整体替换),嵌套对象逐键合并。
  * null/undefined 视为"未设置"(保持 base),因此顶层或节级 null 不会炸掉后续访问
  * (合并前的平铺写法 {...DEFAULT, ...raw} 对 null spread 同样是安全的)。
+ * 导出供测试。
  */
-function deepMerge(base: unknown, override: unknown): unknown {
+export function deepMerge(base: unknown, override: unknown): unknown {
   if (!isRecord(override)) return base;
   if (!isRecord(base)) return override;
   const out: Record<string, unknown> = { ...base };

@@ -18,86 +18,57 @@
  *    - 追加一条 user 摘要指令
  *  => 摘要请求的前缀与最后一次正常请求完全一致,服务器端前缀缓存命中,
  *     只有追加的摘要指令是新鲜写入的。
+ *
+ * 能力降级(官方 pi 或缺失 fork API 时):
+ *   transformContext / buildContextEntries / getSystemPrompt 缺失 → 告警并
+ *   回退默认 compact;工具格式未知 → fail-closed 回退;只有全部条件成立才
+ *   在 details 里标记 cacheSafe: true。
  */
 
 import { convertToLlm, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import { streamSimple, type SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Tool } from "@earendil-works/pi-ai";
+import type { Tool, Message } from "@earendil-works/pi-ai";
 import type { ExtensionContext, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { EXT_NAME, type CompactConfig } from "./config.ts";
+import {
+  contentToText,
+  extractMetaFromMessages,
+  extractRecentFiles,
+  extractLoadedSkills,
+  openAIToolsToPiTools,
+  readFileContents,
+  readSkillContents,
+} from "./pure.ts";
 import { extractPayloadMeta, logRequest } from "./sink.ts";
 
 let loggerWarned = false;
 
 const SUMMARY_INSTRUCTION = `Summarize the conversation above. Produce a concise structured summary that preserves enough detail to continue working without the full history. Include: goals and constraints, what has been done, what is in progress, blockers, key decisions and why, exact file paths/function names/commands/error strings when known, and the next concrete steps. Do not mention the summarization itself.`;
 
-function contentToText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c) => {
-        if (c && typeof c === "object") {
-          const item = c as { type?: string; text?: string; name?: string; arguments?: unknown };
-          switch (item.type) {
-            case "text":
-              return item.text ?? "";
-            case "thinking":
-              // Drop chain-of-thought from the persisted summary entirely (it is
-              // multi-line; a line-based filter would leak the remaining lines).
-              return "";
-            case "toolCall": {
-              const args = typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? {});
-              return `[toolCall] ${item.name ?? "tool"}(${args})`;
-            }
-            default:
-              return `[${item.type ?? "unknown"}]`;
-          }
-        }
-        return String(c);
-      })
-      .join("\n");
-  }
-  return "";
-}
-
-/**
- * Convert serialized OpenAI-format tools (`{type:"function", function:{name,
- * description, parameters, strict}}`) captured from the last normal request back
- * into the pi `Tool[]` shape that streamSimple's `context.tools` expects. The
- * provider re-serializes these through convertTools, producing byte-identical
- * `tools` in the outgoing request (verified: reverse-map + convertTools round
- * trip is byte-identical for the captured 22-tool body). Grammar/`custom` tools
- * are skipped (not supported on this relay).
- *
- * `strict` is faithfully re-derived: convertTools only emits `strict: true`
- * for tools with `constrainedSampling.type === "json_schema"`, so we must
- * re-attach that marker when the captured tool carried `strict: true`; otherwise
- * the round-trip would degrade it to `false` and change the request bytes.
- */
-function openAIToolsToPiTools(tools: unknown[]): Tool[] {
-  const result: Tool[] = [];
-  for (const raw of tools) {
-    const t = raw as {
-      type?: string;
-      function?: { name?: string; description?: string; parameters?: unknown; strict?: unknown };
-    };
-    if (t?.type !== "function" || !t.function?.name) continue;
-    const tool: Tool = {
-      name: t.function.name,
-      description: t.function.description ?? "",
-      parameters: (t.function.parameters ?? {}) as Tool["parameters"],
-    };
-    if (t.function.strict === true) {
-      tool.constrainedSampling = { type: "json_schema", strict: "require" };
-    }
-    result.push(tool);
-  }
-  return result;
+/** fork 能力探测:0.84.x 官方包已有 transformContext/getSystemPrompt,
+ *  registerSystemPromptFilter 是 my-pi fork 独有(index.ts 已防御)。这里再兜一层,
+ *  任一缺失都回退默认 compact 而不是带病执行。 */
+function forkCapabilities(ctx: ExtensionContext): {
+  transformContext: boolean;
+  buildContextEntries: boolean;
+  getSystemPrompt: boolean;
+  modelRegistryAuth: boolean;
+} {
+  const forkCtx = ctx as ExtensionContext & {
+    transformContext?: (messages: unknown[]) => Promise<unknown[]>;
+    getSystemPrompt?: () => string;
+  };
+  return {
+    transformContext: typeof forkCtx.transformContext === "function",
+    buildContextEntries: typeof ctx.sessionManager?.buildContextEntries === "function",
+    getSystemPrompt: typeof forkCtx.getSystemPrompt === "function",
+    modelRegistryAuth: typeof ctx.modelRegistry?.getApiKeyAndHeaders === "function",
+  };
 }
 
 /**
@@ -113,6 +84,9 @@ function openAIToolsToPiTools(tools: unknown[]): Tool[] {
  * instead of hand-copying its behavior is what keeps the rebuilt prefix aligned
  * with the provider-cached payload. Hand-reimplementing it here would drift
  * whenever pi or an extension adds a new context hook.
+ *
+ * 约束:不要在 context hook 内再次调用 transformContext(重入/重复处理风险),
+ * 这是 pi API 的使用约定,扩展自身遵守即可。
  */
 function buildConversationPrefix(branchEntries: unknown[], ctx: ExtensionContext): Promise<unknown[]> {
   const allMessages: unknown[] = [];
@@ -122,178 +96,9 @@ function buildConversationPrefix(branchEntries: unknown[], ctx: ExtensionContext
       allMessages.push(...entryMessages);
     }
   }
-  return ctx
-    .transformContext(allMessages as AgentMessage[])
-    .then((transformed) => convertToLlm(transformed as AgentMessage[]) as unknown[]);
-}
-
-/** 提取 compact 请求体元信息(request-logger 落盘用)。 */
-function extractMetaFromMessages(
-  messages: unknown[],
-  tools: Tool[] | undefined,
-  modelId: string,
-  maxTokens: number,
-): Record<string, number | string> {
-  let systemPromptLength: number | undefined;
-  const first = messages[0] as { role?: string; content?: unknown } | undefined;
-  if (first && (first.role === "system" || first.role === "developer") && typeof first.content === "string") {
-    systemPromptLength = first.content.length;
-  }
-  return {
-    messageCount: messages.length,
-    toolCount: tools?.length ?? 0,
-    systemPromptLength: systemPromptLength ?? 0,
-    model: modelId,
-    maxTokens,
-  };
-}
-
-/**
- * Collect the most recently touched file paths from branch entries, scanning
- * backwards so the newest tool calls win. Mirrors Claude Code's "top N recent
- * files" re-injection: only read/write/edit tool calls with a string `path`
- * argument count.
- */
-function extractRecentFiles(branchEntries: unknown[], maxFiles: number): string[] {  const seen = new Set<string>();
-  const result: string[] = [];
-  for (let i = branchEntries.length - 1; i >= 0 && result.length < maxFiles; i--) {
-    const entry = branchEntries[i] as { type?: string; message?: { role?: string; content?: unknown } } | undefined;
-    if (!entry || entry.type !== "message") continue;
-    const msg = entry.message;
-    if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
-    for (const block of msg.content) {
-      const tool = block as { type?: string; name?: string; arguments?: { path?: string } } | undefined;
-      if (!tool || tool.type !== "toolCall" || typeof tool.name !== "string") continue;
-      if (tool.name !== "read" && tool.name !== "write" && tool.name !== "edit") continue;
-      const path = tool.arguments?.path;
-      if (typeof path !== "string" || path.length === 0 || seen.has(path)) continue;
-      seen.add(path);
-      result.push(path);
-      if (result.length >= maxFiles) break;
-    }
-  }
-  return result;
-}
-
-/**
- * 有界读取:最多读 maxChars 个字符(按 UTF-8 每字符 4 字节上限取字节数),
- * 避免把超大文件整体读进内存(旧实现 readFileSync 无上限)。
- * 返回截断标记:文件比读取的字节多(或解码后超过 maxChars)视为截断。
- */
-function readFirstChars(path: string, maxChars: number): { text: string; truncated: boolean } {
-  const size = statSync(path).size;
-  if (size <= 0) return { text: "", truncated: false };
-  const bytes = Math.min(size, maxChars * 4);
-  const fd = openSync(path, "r");
-  try {
-    const buf = Buffer.alloc(bytes);
-    const read = readSync(fd, buf, 0, bytes, 0);
-    const text = buf.subarray(0, read).toString("utf8");
-    const truncated = read < size || text.length > maxChars;
-    return { text: text.slice(0, maxChars), truncated };
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/**
- * Read file contents for the given paths, respecting a total token budget.
- * Files are truncated to `maxCharsPerFile`; the total is capped at `fileTokenBudget`
- * (chars/4 heuristic). Unreadable files are skipped. Returns a text block ready to
- * be appended to the summary.
- */
-function readFileContents(paths: string[], cfg: CompactConfig): string {
-  const totalBudgetChars = cfg.fileTokenBudget * 4;
-  const sections: string[] = [];
-  let used = 0;
-  for (const p of paths) {
-    if (used >= totalBudgetChars) break;
-    try {
-      if (!existsSync(p)) continue;
-      const size = statSync(p).size;
-      if (size <= 0) continue;
-      const limit = Math.min(cfg.maxCharsPerFile, totalBudgetChars - used);
-      const { text, truncated } = readFirstChars(p, limit);
-      if (!text) continue;
-      used += text.length;
-      sections.push(`### ${p}\n${text}${truncated ? "\n[truncated]" : ""}`);
-    } catch {
-      // unreadable/binary file - skip
-    }
-  }
-  return sections.length > 0 ? sections.join("\n\n") : "";
-}
-
-/**
- * Identify skills that were loaded via the `read` tool during the session.
- * Skills live at `<agentDir>/skills/<name>/SKILL.md` (or a custom path ending in
- * SKILL.md). Scan branch entries backwards for read tool calls whose `path` points
- * at a SKILL.md file or a skill directory, and return the SKILL.md file paths
- * (deduped, newest first).
- */
-function extractLoadedSkills(branchEntries: unknown[], maxSkills: number): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (let i = branchEntries.length - 1; i >= 0 && result.length < maxSkills; i--) {
-    const entry = branchEntries[i] as { type?: string; message?: { role?: string; content?: unknown } } | undefined;
-    if (!entry || entry.type !== "message") continue;
-    const msg = entry.message;
-    if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
-    for (const block of msg.content) {
-      const tool = block as { type?: string; name?: string; arguments?: { path?: string } } | undefined;
-      if (!tool || tool.type !== "toolCall" || tool.name !== "read") continue;
-      const path = tool.arguments?.path;
-      if (typeof path !== "string" || path.length === 0 || seen.has(path)) continue;
-      if (isSkillFile(path)) {
-        seen.add(path);
-        result.push(path);
-        if (result.length >= maxSkills) break;
-      }
-    }
-  }
-  return result;
-}
-
-function isSkillFile(path: string): boolean {
-  const normalized = path.replace(/\\/g, "/");
-  if (normalized.endsWith("SKILL.md")) return true;
-  // A read inside a skill directory (parent of SKILL.md) also counts.
-  return /\/skills\/[^/]+\/.*\.(md|markdown)$/i.test(normalized) ||
-    /(^|\/)\.claude\/skills\//.test(normalized) ||
-    /(^|\/)(agents\/skills|skills)\//.test(normalized);
-}
-
-/**
- * Read skill file contents under a token budget. Returns a text block ready to be
- * appended to the summary, labeling each skill by its directory name.
- */
-function readSkillContents(skillPaths: string[], cfg: CompactConfig): string {
-  const totalBudgetChars = cfg.skillTokenBudget * 4;
-  const sections: string[] = [];
-  let used = 0;
-  for (const p of skillPaths) {
-    if (used >= totalBudgetChars) break;
-    try {
-      if (!existsSync(p)) continue;
-      const size = statSync(p).size;
-      if (size <= 0) continue;
-      const label = skillLabel(p);
-      const limit = totalBudgetChars - used;
-      const { text, truncated } = readFirstChars(p, limit);
-      if (!text) continue;
-      used += text.length;
-      sections.push(`### Skill: ${label}\n${text}${truncated ? "\n[truncated]" : ""}`);
-    } catch {
-      // unreadable - skip
-    }
-  }
-  return sections.length > 0 ? sections.join("\n\n") : "";
-}
-
-function skillLabel(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
-  const m = normalized.match(/([^/]+)\/SKILL\.md$/i);
-  return m ? m[1] : normalized.split("/").slice(-2).join("/");
+  const forkCtx = ctx as ExtensionContext & { transformContext?: (messages: unknown[]) => Promise<unknown[]> };
+  const transform = forkCtx.transformContext ?? ((messages: unknown[]) => Promise.resolve(messages));
+  return transform(allMessages as AgentMessage[]).then((transformed) => convertToLlm(transformed as AgentMessage[]) as unknown[]);
 }
 
 async function runCacheSafeCompact(
@@ -306,6 +111,17 @@ async function runCacheSafeCompact(
   const model = ctx.model;
   if (!model) {
     console.error(`[${EXT_NAME}:compact] no active model, skipping cache-safe compact`);
+    return undefined;
+  }
+
+  // 能力探测:任一 fork API 缺失 → 告警并回退默认 compact(不标 cacheSafe)。
+  const capabilities = forkCapabilities(ctx);
+  if (!capabilities.transformContext || !capabilities.buildContextEntries || !capabilities.getSystemPrompt) {
+    console.warn(
+      `[${EXT_NAME}:compact] missing capabilities (transformContext=${capabilities.transformContext}, ` +
+        `buildContextEntries=${capabilities.buildContextEntries}, getSystemPrompt=${capabilities.getSystemPrompt}); ` +
+        `falling back to default compact`,
+    );
     return undefined;
   }
 
@@ -358,7 +174,8 @@ async function runCacheSafeCompact(
 
   // system prompt:取当前会话值(经 system_prompt_filter 过滤后与工具激活集
   // 无关,恒等于正常请求发送的 system → 前缀第 1 段逐字节一致)。
-  const systemPrompt = ctx.getSystemPrompt();
+  const forkCtx = ctx as ExtensionContext & { getSystemPrompt?: () => string };
+  const systemPrompt = forkCtx.getSystemPrompt?.() ?? "";
   if (!cfg.keepSystemPrompt || !systemPrompt) {
     console.warn(`[${EXT_NAME}:compact] keepSystemPrompt disabled or no system prompt, skipping cache-safe compact`);
     return undefined;
@@ -368,21 +185,44 @@ async function runCacheSafeCompact(
   // MUST send the same tools array as the last normal request or the cache can
   // never hit. Capture them from `before_provider_request` (only normal agent
   // requests fire that hook; the compact request itself calls streamSimple
-  // directly and does not loop back). Snapshot is persisted to a sidecar so a
-  // reload between the last request and the compact still replays it.
+  // directly and does not loop back). Snapshot is persisted to a sidecar keyed
+  // by cwd + model id, so a reload between the last request and the compact
+  // still replays it and two models in one cwd never cross-contaminate.
   const capturedTools = snapshot.tools;
-  const compactTools: Tool[] | undefined =
-    capturedTools && capturedTools.length > 0 ? openAIToolsToPiTools(capturedTools) : undefined;
+  let compactTools: Tool[] | undefined;
+  let toolsFormat: string | undefined;
+  let toolsFailClosed = false;
+  if (capturedTools && capturedTools.length > 0) {
+    const converted = openAIToolsToPiTools(capturedTools);
+    if (converted === null) {
+      // 未知/混合工具格式:fail-closed,回退默认 compact,不猜测性回放。
+      toolsFailClosed = true;
+    } else {
+      compactTools = converted.tools;
+      toolsFormat = converted.format;
+    }
+  }
+  if (toolsFailClosed) {
+    console.warn(
+      `[${EXT_NAME}:compact] captured tools use an unknown or mixed format; failing closed and falling back to default compact`,
+    );
+    return undefined;
+  }
   if (!compactTools || compactTools.length === 0) {
     console.warn(
       `[${EXT_NAME}:compact] no tools captured from the last request; compact prefix will likely miss the server-side cache`,
     );
   }
   console.info(
-    `[${EXT_NAME}:compact] replaying prefix: ${prefix.length} messages (rebuilt via transformContext), ${compactTools?.length ?? 0} tools, system prompt from current session`,
+    `[${EXT_NAME}:compact] replaying prefix: ${prefix.length} messages (rebuilt via transformContext), ` +
+      `${compactTools?.length ?? 0} tools (${toolsFormat ?? "none"}), system prompt from current session`,
   );
 
   // Resolve auth for the active model.
+  if (!capabilities.modelRegistryAuth) {
+    console.warn(`[${EXT_NAME}:compact] modelRegistry.getApiKeyAndHeaders unavailable; falling back to default compact`);
+    return undefined;
+  }
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok) {
     console.error(`[${EXT_NAME}:compact] failed to resolve auth: ${auth.error}`);
@@ -399,13 +239,13 @@ async function runCacheSafeCompact(
   if (event.customInstructions) {
     instruction += `\n\nAdditional focus requested by the user: ${event.customInstructions}`;
   }
-  const summarizationMessages = [
-    ...prefix,
+  const summarizationMessages: Message[] = [
+    ...(prefix as Message[]),
     {
       role: "user" as const,
       content: [{ type: "text" as const, text: instruction }],
       timestamp: Date.now(),
-    },
+    } as Message,
   ];
 
   const maxTokens = cfg.maxTokens;
@@ -425,20 +265,24 @@ async function runCacheSafeCompact(
     apiKey: auth.apiKey,
     headers,
     cacheRetention: "short",
-    onPayload: (payload) => {
-      try {
-        logRequest(ctx.cwd ?? process.cwd(), payload, {
-          type: "compact-final",
-          ...extractPayloadMeta(payload),
-        });
-      } catch (err) {
-        if (!loggerWarned) {
-          loggerWarned = true;
-          console.warn(`[${EXT_NAME}:compact] request-logger unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    ...(cfg.logRequests
+      ? {
+          onPayload: (payload: unknown) => {
+            try {
+              logRequest(ctx.cwd ?? process.cwd(), payload, {
+                type: "compact-final",
+                ...extractPayloadMeta(payload),
+              });
+            } catch (err) {
+              if (!loggerWarned) {
+                loggerWarned = true;
+                console.warn(`[${EXT_NAME}:compact] request-logger unavailable: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            }
+            return undefined;
+          },
         }
-      }
-      return undefined;
-    },
+      : {}),
   };
   if (cfg.summaryReasoning && cfg.summaryReasoning !== "off") {
     options.reasoning = cfg.summaryReasoning;
@@ -447,19 +291,21 @@ async function runCacheSafeCompact(
   try {
     // 记录 compact 请求输入到 request-logger(与正常请求同一目录,便于对比)。
     // compact 直连 streamSimple 不走 before_provider_request,这里手动调用 sink。
-    try {
-      const payloadForLog = {
-        model: model.id,
-        messages: summarizationMessages,
-        tools: compactTools,
-        max_tokens: maxTokens,
-      };
-      logRequest(ctx.cwd ?? process.cwd(), payloadForLog, {
-        type: "compact",
-        ...extractMetaFromMessages(summarizationMessages, compactTools, model.id, maxTokens),
-      });
-    } catch (err) {
-      console.warn(`[${EXT_NAME}:compact] request-logger unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    if (cfg.logRequests) {
+      try {
+        const payloadForLog = {
+          model: model.id,
+          messages: summarizationMessages,
+          tools: compactTools,
+          max_tokens: maxTokens,
+        };
+        logRequest(ctx.cwd ?? process.cwd(), payloadForLog, {
+          type: "compact",
+          ...extractMetaFromMessages(summarizationMessages, compactTools, model.id, maxTokens),
+        });
+      } catch (err) {
+        console.warn(`[${EXT_NAME}:compact] request-logger unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
     const stream = streamSimple(model, { systemPrompt, messages: summarizationMessages, tools: compactTools }, options);
     const assistantMessage = await stream.result();
@@ -477,7 +323,9 @@ async function runCacheSafeCompact(
 
     // Claude Code-style re-injection: append the content of recently touched
     // files so the compacted context still carries the actual working files,
-    // not just a textual summary.
+    // not just a textual summary. 注意:回注会把文件内容/命令输出等持久化进
+    // 摘要,扩大敏感数据与仓库内 prompt injection 内容的留存范围——预算默认值
+    // 已调低,也可用 injectRecentFiles/injectLoadedSkills 关闭。
     let finalSummary = summary;
     let injectedFiles: string[] = [];
     if (cfg.injectRecentFiles) {
@@ -503,6 +351,8 @@ async function runCacheSafeCompact(
       }
     }
 
+    // 只有全部条件成立才标记 cacheSafe:true(前缀对齐 + 工具可回放 + 摘要成功)。
+    const cacheSafe = compactTools !== undefined && compactTools.length > 0 && prefix.length > 0;
     return {
       compaction: {
         summary: finalSummary,
@@ -510,8 +360,11 @@ async function runCacheSafeCompact(
         tokensBefore: preparation.tokensBefore,
         usage: assistantMessage.usage,
         details: {
-          cacheSafe: true,
+          cacheSafe,
+          ...(cacheSafe ? {} : { cacheMissReason: "no tools captured from the last request" }),
           prefixMessages: prefix.length,
+          toolsFormat,
+          cacheReadTokens: assistantMessage.usage?.cacheRead ?? 0,
           injectedFiles,
           injectedSkills,
         },
@@ -524,27 +377,34 @@ async function runCacheSafeCompact(
 }
 
 export interface BeforeProviderRequestEvent {
-  payload?: { tools?: unknown[] };
+  type: "before_provider_request";
+  payload: unknown;
 }
 
 /** 最后一次正常请求的 tools 数组快照。system prompt 不捕获(getSystemPrompt 恒稳定)。 */
 interface LastRequestSnapshot {
   /** OpenAI-format tools array from the last normal request payload. */
   tools?: unknown[];
+  /** 快照所属模型 id(sidecar 键的一部分,防止同 cwd 不同模型串用)。 */
+  model?: string;
   timestamp?: number;
 }
 
 /**
- * 快照按 cwd 持久化到 sidecar 文件。原因:/reload 或进程重启后,内存捕获
+ * 快照按 cwd + model id 持久化到 sidecar 文件。原因:/reload 或进程重启后,内存捕获
  * (lastRequestTools)丢失;若用户在重载后未发过消息就直接 /compact,compact
  * 请求的 tools 为空 → 前缀与最后一次正常请求不一致 → 服务器端前缀缓存 miss。
  * sidecar 让跨进程的 compact 也能回放最后一次请求的 tools。
  * (system prompt 经 system_prompt_filter 后恒稳定,不需要持久化。)
+ *
+ * 注意:同一 cwd 的两个 pi 进程仍会竞争同一 sidecar 文件(最后写入者胜),
+ * 但键含模型 id,不同模型互不污染;这是尽力而为的兜底,非强一致。
  */
 const SIDECAR_DIR = join(homedir(), ".pi", "agent");
-function sidecarPath(cwd: string): string {
-  const hash = createHash("sha1").update(cwd).digest("hex").slice(0, 12);
-  return join(SIDECAR_DIR, `cache-stack-last-request-${hash}.json`);
+function sidecarPath(cwd: string, model: string): string {
+  const cwdHash = createHash("sha1").update(cwd).digest("hex").slice(0, 12);
+  const modelHash = createHash("sha1").update(model).digest("hex").slice(0, 8);
+  return join(SIDECAR_DIR, `cache-stack-last-request-${cwdHash}-${modelHash}.json`);
 }
 
 export interface CompactHooks {
@@ -556,20 +416,24 @@ export interface CompactHooks {
 
 export function setupCompact(getCfg: () => CompactConfig): CompactHooks {
   let lastSnapshot: LastRequestSnapshot = {};
-  let lastCwd: string | undefined;
-  let lastSnapshotJson: string | undefined;
+  /** 内存缓存键:`${cwd}\u0000${model}`。 */
+  let lastKey: string | undefined;
+  /** tools 内容 JSON(不含 timestamp),用于去重:tools 未变就不写盘。 */
+  let lastToolsJson: string | undefined;
 
-  function loadSnapshot(cwd: string): LastRequestSnapshot {
-    if (lastCwd === cwd && lastSnapshotJson !== undefined) {
-      // 内存快照(当前进程捕获过请求)
+  function loadSnapshot(cwd: string, model: string): LastRequestSnapshot {
+    const key = `${cwd}\u0000${model}`;
+    if (lastKey === key && lastToolsJson !== undefined) {
+      // 内存快照(当前进程捕获过该 cwd+model 的请求)
       return lastSnapshot;
     }
     // 跨进程/跨会话兜底:读 sidecar。读失败(首次/损坏)不阻塞 compact。
     try {
-      if (existsSync(sidecarPath(cwd))) {
-        const snap = JSON.parse(readFileSync(sidecarPath(cwd), "utf8")) as LastRequestSnapshot;
-        lastCwd = cwd;
+      if (existsSync(sidecarPath(cwd, model))) {
+        const snap = JSON.parse(readFileSync(sidecarPath(cwd, model), "utf8")) as LastRequestSnapshot;
+        lastKey = key;
         lastSnapshot = snap;
+        lastToolsJson = JSON.stringify(snap.tools ?? null);
         return snap;
       }
     } catch {
@@ -578,20 +442,28 @@ export function setupCompact(getCfg: () => CompactConfig): CompactHooks {
     return {};
   }
 
-  function saveSnapshot(payload: BeforeProviderRequestEvent["payload"], cwd: string): void {
+  function saveSnapshot(payload: BeforeProviderRequestEvent["payload"], cwd: string, model: string): void {
     const p = payload as { tools?: unknown[] } | undefined;
-    if (p && Array.isArray(p.tools) && p.tools.length > 0) {
-      lastSnapshot = {
-        tools: p.tools,
-        timestamp: Date.now(),
-      };
-    }
-    lastCwd = cwd;
-    const json = JSON.stringify(lastSnapshot);
-    if (json === lastSnapshotJson) return; // 内容未变,不重复写盘
-    lastSnapshotJson = json;
+    if (!p || !Array.isArray(p.tools)) return; // 形状不符不捕获
+    // 显式空 tools(如全量工具被禁用)清除旧快照:不能拿上一个模型/会话的
+    // 旧工具去回放,否则缓存必然 miss 且回放内容错误。
+    const next: LastRequestSnapshot = p.tools.length > 0 ? { tools: p.tools, model, timestamp: Date.now() } : { model };
+    const toolsJson = JSON.stringify(next.tools ?? null);
+    lastKey = `${cwd}\u0000${model}`;
+    if (toolsJson === lastToolsJson) return; // tools 未变,不重复写盘(timestamp 不计入比较)
+    lastToolsJson = toolsJson;
+    lastSnapshot = next;
     try {
-      writeFileSync(sidecarPath(cwd), json, "utf8");
+      if (next.tools) {
+        writeFileSync(sidecarPath(cwd, model), JSON.stringify(next), "utf8");
+      } else {
+        // 清掉陈旧的 sidecar,避免下次进程读到旧工具
+        try {
+          unlinkSync(sidecarPath(cwd, model));
+        } catch {
+          // 文件不存在,无需处理
+        }
+      }
     } catch {
       // 写盘失败不阻塞请求(内存快照仍可用)
     }
@@ -602,20 +474,23 @@ export function setupCompact(getCfg: () => CompactConfig): CompactHooks {
       if (!getCfg().enabled) return undefined;
       // 防御:runner 未来若不给 handler 传 ctx,降级用进程 cwd(不至于抛异常丢捕获)。
       const cwd = ctx?.cwd ?? process.cwd();
-      saveSnapshot(event.payload, cwd);
+      const payload = event.payload as { tools?: unknown[]; model?: string } | undefined;
+      const model = payload?.model ?? (ctx as { model?: { id?: string } } | undefined)?.model?.id ?? "unknown";
+      saveSnapshot(payload, cwd, model);
       return undefined;
     },
 
     async onBeforeCompact(event, ctx) {
       if (!getCfg().enabled) return undefined;
-      return runCacheSafeCompact(event, ctx, getCfg(), loadSnapshot(ctx.cwd));
+      const modelId = ctx.model?.id ?? "unknown";
+      return runCacheSafeCompact(event, ctx, getCfg(), loadSnapshot(ctx.cwd, modelId));
     },
 
     onReset() {
       // 只清内存;sidecar 保留,供下次进程恢复后 compact 兜底。
       lastSnapshot = {};
-      lastCwd = undefined;
-      lastSnapshotJson = undefined;
+      lastKey = undefined;
+      lastToolsJson = undefined;
     },
   };
 }

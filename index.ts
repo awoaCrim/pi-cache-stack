@@ -74,6 +74,9 @@ export default function cacheStack(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", async () => {
+    // 每次新会话重载配置:lazyTools.enabled/alwaysActive 的修改在下一次
+    // session_start 生效(配合 lazy-tools 的 reconcile,无需重启)。
+    cfg = loadConfig();
     // pi 保证 session_start 先于首个 before_agent_start。
     lazyTools.onSessionStart();
   });
@@ -88,14 +91,15 @@ export default function cacheStack(pi: ExtensionAPI): void {
   pi.on("before_provider_request", (event: BeforeProviderRequestEvent, ctx: ExtensionContext) => {
     return compact.onBeforeProviderRequest(event, ctx);
   });
-
   pi.on("tool_execution_end", () => {
     lazyTools.onToolExecutionEnd();
   });
 
   pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx: ExtensionContext) => {
     cfg = loadConfig();
-    return compact.onBeforeCompact(event, ctx);
+    // SessionBeforeCompactResult 未从包导出,无法精确标注;as never 只用于
+    // 通过重载返回类型检查,运行时值不受影响。
+    return compact.onBeforeCompact(event, ctx) as never;
   });
 
   pi.on("session_shutdown", () => {
