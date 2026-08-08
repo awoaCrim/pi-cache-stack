@@ -1,0 +1,28 @@
+{
+  "name": "pi-cache-stack",
+  "version": "0.1.0",
+  "description": "Cache optimization stack for pi: stable server-side prefix cache hits (compact) + on-demand tool activation (lazy-tools)",
+  "type": "module",
+  "files": [
+    "*.ts"
+  ],
+  "keywords": [
+    "pi",
+    "pi-package",
+    "extension",
+    "cache",
+    "compact",
+    "lazy-tools"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": ">=0.81.0 <0.85.0",
+    "@earendil-works/pi-ai": ">=0.81.0 <0.85.0",
+    "@earendil-works/pi-coding-agent": ">=0.81.0 <0.85.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
