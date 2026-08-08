@@ -265,6 +265,11 @@ async function runCacheSafeCompact(
     apiKey: auth.apiKey,
     headers,
     cacheRetention: "short",
+    // 复用 normal 请求的会话 ID:new-api 等中继靠 x-client-request-id /
+    // x-session-affinity 把同一会话路由到同一个缓存副本。compact 直连
+    // streamSimple 若不传 sessionId,请求就缺少亲和头,前缀再对齐也会漂到
+    // 别的缓存副本导致 miss。
+    sessionId: ctx.sessionManager.getSessionId(),
     ...(cfg.logRequests
       ? {
           onPayload: (payload: unknown) => {
