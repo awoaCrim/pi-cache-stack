@@ -1,16 +1,16 @@
 # pi-cache-stack
 
-pi 的缓存优化栈扩展,合并自 compact-safe + lazy-tools:
+pi 的缓存优化栈扩展:通过保持请求结构稳定,帮助中继(DeepSeek/new-api 等)的服务器端前缀缓存稳定命中:
 
 1. **lazy-tools** — 按需激活大工具,收缩并稳定请求体 `tools[]`(前缀第 2 段)。常驻集之外的所有已注册工具自动视为懒加载,通过 `lazy` 代理工具按需激活,激活后整个会话保持。
-2. **compact** — compact 摘要请求回放最后一次正常请求的 `tools[]` + 对话前缀,让中继(DeepSeek/new-api 等)的服务器端前缀缓存稳定命中。
+2. **stable tool prompt** — system-prompt 过滤器,让 `system prompt` 与工具激活集解耦(前缀第 1 段恒定)。
+
+本扩展**不实现或存储模型缓存**,也不接管 pi 的压缩流程;实际缓存仍由 Provider 负责。它只通过"请求结构稳定性"间接提高前缀复用概率。
 
 ## 前提与降级
 
 - **system prompt 稳定性**依赖 pi 本体的 `system_prompt_filter` 机制(my-pi fork 的 `registerSystemPromptFilter`)。官方 pi 没有该 API 时,扩展会告警并降级:system prompt 可能随工具激活变化,前缀缓存可能 miss。
-- **compact 能力检查**:`transformContext` / `buildContextEntries` / `getSystemPrompt` / `modelRegistry.getApiKeyAndHeaders` 任一缺失 → 告警并回退 pi 默认 compact,不会带病执行。
-- **工具格式 fail-closed**:捕获的 tools 若是未知或混合格式(Chat Completions 与 Responses 形状混用)→ 回退默认 compact,不猜测性回放;只有全部条件成立才在 compact 的 `details.cacheSafe` 标记 `true`。
-- **使用约定**:不要在 context hook 内再次调用 `transformContext`(重入/重复处理风险)。
+- **lazy 不是权限隔离**:模型可以搜索并激活所有已注册工具,它只减少工具 schema 和 token。
 
 ## 安装
 
@@ -23,7 +23,7 @@ git clone https://github.com/awoaCrim/pi-cache-stack.git ~/.pi/agent/extensions/
 
 ## 配置
 
-`~/.pi/agent/cache-stack.json`,节级深合并,数组整体替换,`null` 视为未设置。合并前的 `lazy-tools.json` / `compact-safe.json` 不再读取。
+`~/.pi/agent/cache-stack.json`,节级深合并,数组整体替换,`null` 视为未设置。
 
 ```jsonc
 {
@@ -31,28 +31,11 @@ git clone https://github.com/awoaCrim/pi-cache-stack.git ~/.pi/agent/extensions/
     "enabled": true,
     // 常驻工具集:合并语义(默认集 ∪ 配置集),只能追加不能删核心工具
     "alwaysActive": []
-  },
-  "compact": {
-    "enabled": true,
-    "maxTokens": 4096,
-    // 摘要请求的推理级别;默认 off,CoT 会抢占输出 token 预算
-    "summaryReasoning": "off",
-    "keepSystemPrompt": true,
-    // 把 compact 请求体(messages/tools 全文,可能含敏感内容)落盘到
-    // ~/.pi/agent/requests/<cwd-hash>/ 用于缓存对比;文件权限 0o600。
-    // 介意隐私可设 false(compact 请求不再记录,正常请求由 request-logger 决定)。
-    "logRequests": true,
-    "injectRecentFiles": true,
-    "maxRecentFiles": 5,
-    "fileTokenBudget": 12000,
-    "maxCharsPerFile": 40000,
-    "injectLoadedSkills": true,
-    "skillTokenBudget": 12000
   }
 }
 ```
 
-配置变更在 `session_start` 与 `session_before_compact` 时重载:
+配置变更在 `session_start` 时重载:
 - `lazyTools.enabled` 切到 `false` 后,下一次会话恢复 pi 默认全量工具集;
 - `lazyTools.alwaysActive` 变更在下一次会话生效(无需重启)。
 
@@ -62,12 +45,6 @@ git clone https://github.com/awoaCrim/pi-cache-stack.git ~/.pi/agent/extensions/
 - `/lazy search <query>` / `/lazy activate <names>` / `/lazy reset`
 - 模型侧通过 `lazy` 工具(search / activate / reset)按需激活工具;激活结果会附上该工具的 description + promptGuidelines(system prompt 为保持前缀稳定只含常驻工具,动态工具的用法说明随激活结果给出)
 
-## 安全说明
-
-- **lazy 不是权限隔离**:模型可以搜索并激活所有已注册工具,它只减少工具 schema 和 token。
-- **回注扩大留存范围**:`injectRecentFiles` / `injectLoadedSkills` 会把文件内容、命令输出等写进摘要并随会话持久化,也扩大了仓库内 prompt injection 内容的留存;预算默认值已调低,可用开关关闭。
-- **sidecar 快照**:按 `cwd + model id` 键控;同一 cwd 的两个 pi 进程仍可能竞争同一文件(最后写入者胜),这是尽力而为的兜底。
-
 ## 开发
 
 ```bash
@@ -76,7 +53,7 @@ npm test          # node --test(strip-types)
 npm run typecheck # tsc --noEmit(针对官方 pi 0.84.1 类型)
 ```
 
-测试覆盖:配置深合并、sink 落盘(0o600/元数据)、消息转文本、工具反序列化(Chat Completions / Responses 双格式 + fail-closed)、有界文件读取、最近文件/技能提取、lazy 激活与配置 reconcile(启用/禁用切换、alwaysActive 变更、激活 guidance)。
+测试覆盖:配置深合并、lazy 激活与配置 reconcile(启用/禁用切换、alwaysActive 变更、激活 guidance)。
 
 ## 与 my-pi fork 的关系
 

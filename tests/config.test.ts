@@ -25,17 +25,15 @@ describe("config deepMerge", () => {
   });
 
   it("merges nested objects recursively", () => {
-    const base = { compact: { enabled: true, maxTokens: 4096, injectRecentFiles: true } };
-    const merged = deepMerge(base, { compact: { maxTokens: 2048 } }) as typeof base;
-    assert.equal(merged.compact.enabled, true);
-    assert.equal(merged.compact.maxTokens, 2048);
-    assert.equal(merged.compact.injectRecentFiles, true);
+    const base = { lazyTools: { enabled: true, alwaysActive: ["bash"] } };
+    const merged = deepMerge(base, { lazyTools: { alwaysActive: ["bash", "ctx_search"] } }) as typeof base;
+    assert.equal(merged.lazyTools.enabled, true);
+    assert.deepEqual(merged.lazyTools.alwaysActive, ["bash", "ctx_search"]);
   });
 
   it("DEFAULT_CONFIG loads through deepMerge against an empty override", () => {
     const merged = deepMerge(DEFAULT_CONFIG, {}) as typeof DEFAULT_CONFIG;
     assert.equal(merged.lazyTools.enabled, true);
-    assert.equal(merged.compact.logRequests, true);
-    assert.ok(merged.compact.fileTokenBudget < 20000); // budget defaults reduced
+    assert.deepEqual(merged.lazyTools.alwaysActive, ["bash", "read", "write", "edit", "ls", "find", "grep"]);
   });
 });
