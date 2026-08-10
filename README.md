@@ -43,7 +43,9 @@ git clone https://github.com/awoaCrim/pi-cache-stack.git ~/.pi/agent/extensions/
 
 - `/lazy` — 显示 lazy-tools 状态:激活集、请求体开销、如何激活工具
 - `/lazy search <query>` / `/lazy activate <names>` / `/lazy reset`
+- `lazy search` 会把自然语言查询拆词并按名称/描述命中度排序,例如 `web search URL fetch HTTP` 可同时发现 `web_search` 与 `fetch_content`
 - 模型侧通过 `lazy` 工具(search / activate / reset)按需激活工具;激活结果会附上该工具的 description + promptGuidelines(system prompt 为保持前缀稳定只含常驻工具,动态工具的用法说明随激活结果给出)
+- 网页研究或 HTTP(S) URL 抓取应优先使用专用 Web 工具;只有未激活专用工具时才先通过 `lazy` 搜索,而不是直接退回 bash/curl/Python/Node
 
 ## 开发
 

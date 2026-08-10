@@ -91,18 +91,33 @@ function buildStatusText(state: LazyToolsState): string {
   return lines.join("\n");
 }
 
+const SEARCH_STOP_WORDS = new Set(["a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "tool", "tools", "with"]);
+
+function searchTerms(query: string): string[] {
+  return [...new Set(
+    (query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])
+      .filter((term) => term.length > 1 && !SEARCH_STOP_WORDS.has(term)),
+  )];
+}
+
 function findMatchingTools(state: LazyToolsState, query: string): ToolInfo[] {
-  const q = query.toLowerCase();
+  const normalizedQuery = query.trim().toLowerCase();
+  const terms = searchTerms(normalizedQuery);
   return [...state.knownTools.values()]
     .filter((tool) => !state.alwaysActive.has(tool.name))
-    .filter((tool) => {
-      if (!q) return true;
-      return (
-        tool.name.toLowerCase().includes(q) ||
-        (tool.description ?? "").toLowerCase().includes(q)
-      );
+    .map((tool) => {
+      const name = tool.name.toLowerCase().replace(/[_-]+/g, " ");
+      const description = (tool.description ?? "").toLowerCase();
+      let score = normalizedQuery && `${name} ${description}`.includes(normalizedQuery) ? terms.length * 4 + 4 : 0;
+      for (const term of terms) {
+        if (name.includes(term)) score += 4;
+        if (description.includes(term)) score += 1;
+      }
+      return { tool, score };
     })
-    .sort((a, b) => estimateToolBytes(b) - estimateToolBytes(a));
+    .filter(({ score }) => !normalizedQuery || score > 0)
+    .sort((a, b) => b.score - a.score || estimateToolBytes(b.tool) - estimateToolBytes(a.tool))
+    .map(({ tool }) => tool);
 }
 
 function activateTools(state: LazyToolsState, names: string[]): { activated: string[]; missing: string[] } {
@@ -186,10 +201,11 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig):
     name: PROXY_TOOL_NAME,
     label: "Lazy Tool Gateway",
     description:
-      "Lazy-load gateway for tools. Pi keeps a small always-active tool set active; larger tools are deactivated to shrink the request body. Use lazy({}) for status, lazy({ search: \"query\" }) to find a tool, or lazy({ activate: [\"name\"] }) to enable tools for the rest of the session. Activating takes effect on the next agent turn.",
+      "Lazy-load gateway for tools. Pi keeps a small always-active tool set active; larger tools are deactivated to shrink the request body. Use lazy({}) for status, lazy({ search: \"query\" }) to find a tool, or lazy({ activate: [\"name\"] }) to enable tools for the rest of the session. Activating takes effect on the next agent turn. Before falling back to shell code for web research or URL fetching, search for a dedicated tool.",
     promptSnippet: "Discover and activate lazy-loaded tools",
     promptGuidelines: [
       "If a tool you need is not available, call lazy({ search: \"...\" }) to find it.",
+      "For web research or HTTP(S) URL fetching, prefer a dedicated web tool over bash, curl, Python, or Node; if none is active, call lazy({ search: \"web\" }) or lazy({ search: \"fetch\" }) first.",
       "Activate a tool with lazy({ activate: [\"name\"] }); it becomes available on the next turn.",
       "Keep the always-active set small to save tokens in the request body.",
     ],

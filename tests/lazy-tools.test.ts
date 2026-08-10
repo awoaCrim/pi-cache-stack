@@ -74,6 +74,28 @@ describe("lazy-tools activation", () => {
     assert.ok(fake.active.includes("ctx_search"));
   });
 
+  it("matches natural-language capability queries and advertises dedicated web tools before shell workarounds", async () => {
+    const fake = createFakePi();
+    fake.known.push(
+      { name: "web_search", description: "Search the web with source citations", parameters: {} },
+      { name: "fetch_content", description: "Fetch HTTP URLs and extract readable content", parameters: {} },
+    );
+    const cfg = { current: makeCfg() };
+    const hooks = setupLazyTools(fake.pi, () => cfg.current);
+    hooks.onSessionStart();
+    const def = fake.registered[PROXY_TOOL_NAME] as {
+      promptGuidelines: string[];
+      execute: (id: string, params: { search?: string }, ...rest: unknown[]) => Promise<{ content: { type: string; text: string }[] }>;
+    };
+
+    const result = await def.execute("call_1", { search: "web search URL fetch HTTP" });
+    const text = result.content.map((c) => c.text).join("\n");
+
+    assert.match(text, /web_search/);
+    assert.match(text, /fetch_content/);
+    assert.ok(def.promptGuidelines.some((guideline) => guideline.includes("dedicated web tool")));
+  });
+
   it("reconciles alwaysActive changes across sessions without restart", () => {
     const fake = createFakePi();
     const cfg = { current: makeCfg({ alwaysActive: ["ctx_search"] }) };
