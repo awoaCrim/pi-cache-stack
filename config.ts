@@ -15,7 +15,7 @@ import { join } from "node:path";
 export const EXT_NAME = "cache-stack";
 export const CONFIG_PATH = join(homedir(), ".pi", "agent", "cache-stack.json");
 
-/** 常驻工具集:合并语义 = 默认集 ∪ 配置集(配置只能追加,不能删掉核心工具)。 */
+/** 常驻工具集:合并语义 = 默认集 ∪ 配置集；disabled 可显式阻止工具激活。 */
 export const DEFAULT_ALWAYS_ACTIVE = [
   "bash",
   "read",
@@ -29,6 +29,8 @@ export const DEFAULT_ALWAYS_ACTIVE = [
 export interface LazyToolsConfig {
   enabled: boolean;
   alwaysActive: string[];
+  /** Tools that are registered but must never be active or lazy-activated. */
+  disabled?: string[];
 }
 
 export interface CacheStackConfig {
@@ -36,7 +38,7 @@ export interface CacheStackConfig {
 }
 
 export const DEFAULT_CONFIG: CacheStackConfig = {
-  lazyTools: { enabled: true, alwaysActive: DEFAULT_ALWAYS_ACTIVE },
+  lazyTools: { enabled: true, alwaysActive: DEFAULT_ALWAYS_ACTIVE, disabled: [] },
 };
 
 function isRecord(v: unknown): v is Record<string, unknown> {

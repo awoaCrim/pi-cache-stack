@@ -45,18 +45,23 @@ export default function cacheStack(pi: ExtensionAPI): void {
   if (typeof api.registerSystemPromptFilter === "function") {
     api.registerSystemPromptFilter((event) => {
       if (!cfg.lazyTools.enabled) return undefined;
+      const disabled = new Set(cfg.lazyTools.disabled ?? []);
       const keep = new Set([PROXY_TOOL_NAME, ...DEFAULT_ALWAYS_ACTIVE, ...(cfg.lazyTools.alwaysActive ?? [])]);
       const toolSnippets: Record<string, string> = {};
       for (const [name, snippet] of Object.entries(event.toolSnippets)) {
-        if (keep.has(name)) toolSnippets[name] = snippet;
+        if (keep.has(name) && !disabled.has(name)) toolSnippets[name] = snippet;
       }
       const toolGuidelines: string[] = [];
       for (const [name, guidelines] of Object.entries(event.toolGuidelines)) {
-        if (keep.has(name)) toolGuidelines.push(...guidelines);
+        if (keep.has(name) && !disabled.has(name)) toolGuidelines.push(...guidelines);
       }
       // selectedTools:让 buildSystemPrompt 的 hasBash/hasGrep 等派生判断与
       // 可见工具一致(隐藏的工具不会留下"幽灵分支"影响 prompt 引导)。
-      return { toolSnippets, toolGuidelines, selectedTools: [...keep].filter((n) => event.toolNames.includes(n)) };
+      return {
+        toolSnippets,
+        toolGuidelines,
+        selectedTools: [...keep].filter((n) => event.toolNames.includes(n) && !disabled.has(n)),
+      };
     });
   } else {
     console.warn(

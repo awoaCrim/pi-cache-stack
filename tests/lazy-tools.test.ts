@@ -16,6 +16,10 @@ function createFakePi() {
   const known: FakeTool[] = [
     { name: "bash", description: "Run commands", parameters: {}, promptGuidelines: ["prefer compound commands"] },
     { name: "read", description: "Read files", parameters: {}, promptGuidelines: ["use read not cat"] },
+    { name: "find", description: "Find files", parameters: {} },
+    { name: "grep", description: "Search file contents", parameters: {} },
+    { name: "fffind", description: "FFF find files", parameters: {} },
+    { name: "ffgrep", description: "FFF grep contents", parameters: {} },
     { name: "ctx_search", description: "Search indexed context", parameters: {}, promptGuidelines: ["batch all queries in one call"] },
     { name: "ctx_purge", description: "Purge knowledge base", parameters: {}, promptGuidelines: ["requires confirm: true"] },
   ];
@@ -56,6 +60,28 @@ describe("lazy-tools activation", () => {
     assert.ok(fake.active.includes("bash"));
     assert.ok(fake.active.includes("read"));
     assert.ok(!fake.active.includes("ctx_search"));
+  });
+
+  it("does not activate disabled tools and keeps read available", async () => {
+    const fake = createFakePi();
+    const cfg = { current: makeCfg({ alwaysActive: ["fffind", "ffgrep"], disabled: ["find", "grep"] }) };
+    const hooks = setupLazyTools(fake.pi, () => cfg.current);
+    hooks.onSessionStart();
+
+    assert.ok(fake.active.includes("read"));
+    assert.ok(fake.active.includes("fffind"));
+    assert.ok(fake.active.includes("ffgrep"));
+    assert.ok(!fake.active.includes("find"));
+    assert.ok(!fake.active.includes("grep"));
+
+    const def = fake.registered[PROXY_TOOL_NAME] as {
+      execute: (id: string, params: { activate?: string[] }, ...rest: unknown[]) => Promise<{ content: { type: string; text: string }[] }>;
+    };
+    const result = await def.execute("call_1", { activate: ["find", "grep"] });
+    const text = result.content.map((c) => c.text).join("\\n");
+    assert.match(text, /Disabled tool names/);
+    assert.ok(!fake.active.includes("find"));
+    assert.ok(!fake.active.includes("grep"));
   });
 
   it("activates tools via the lazy tool and includes guidance in the result", async () => {

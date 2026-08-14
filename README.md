@@ -7,6 +7,8 @@ pi 的缓存优化栈扩展:通过保持请求结构稳定,帮助中继(DeepSeek
 
 本扩展**不实现或存储模型缓存**,也不接管 pi 的压缩流程;实际缓存仍由 Provider 负责。它只通过"请求结构稳定性"间接提高前缀复用概率。
 
+`lazyTools.disabled` 是工具激活限制，不是注册表删除；被禁用工具仍可能被其他诊断接口列出，但不会出现在 active tools、system prompt 或 lazy 激活结果中。
+
 ## 前提与降级
 
 - **system prompt 稳定性**依赖 pi 本体的 `system_prompt_filter` 机制(my-pi fork 的 `registerSystemPromptFilter`)。官方 pi 没有该 API 时,扩展会告警并降级:system prompt 可能随工具激活变化,前缀缓存可能 miss。
@@ -29,15 +31,19 @@ git clone https://github.com/awoaCrim/pi-cache-stack.git ~/.pi/agent/extensions/
 {
   "lazyTools": {
     "enabled": true,
-    // 常驻工具集:合并语义(默认集 ∪ 配置集),只能追加不能删核心工具
-    "alwaysActive": []
+    // 常驻工具集:合并语义(默认集 ∪ 配置集)
+    // disabled 中的工具不会激活，也不能通过 lazy 激活
+    "alwaysActive": [],
+    // 注册但不允许激活的工具
+    "disabled": []
   }
 }
 ```
 
 配置变更在 `session_start` 时重载:
 - `lazyTools.enabled` 切到 `false` 后,下一次会话恢复 pi 默认全量工具集;
-- `lazyTools.alwaysActive` 变更在下一次会话生效(无需重启)。
+- `lazyTools.alwaysActive` 和 `lazyTools.disabled` 变更在下一次会话生效(无需重启)。
+- `lazyTools.disabled` 中的工具不会进入 active tools，也不能通过 `lazy` 激活；lazy-tools 禁用时恢复 Pi 默认全量工具集。
 
 ## 命令
 

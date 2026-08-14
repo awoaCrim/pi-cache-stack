@@ -22,6 +22,7 @@ export const PROXY_TOOL_NAME = "lazy";
 interface LazyToolsState {
   pi: ExtensionAPI;
   alwaysActive: Set<string>;
+  disabled: Set<string>;
   /** Tools the LLM has activated this session (beyond alwaysActive). */
   activated: Set<string>;
   /** All tool names currently registered (snapshot, refreshed lazily). */
@@ -31,10 +32,13 @@ interface LazyToolsState {
 function createState(pi: ExtensionAPI, cfg: LazyToolsConfig): LazyToolsState {
   // Merge configured always-active tools with the defaults rather than replacing
   // them: a config like {"alwaysActive": ["bash"]} must not silently drop
-  // read/write/edit, otherwise the model loses its core file tools.
+  // read/write/edit. Explicit disabled entries are removed afterward.
   const configured = cfg.alwaysActive && cfg.alwaysActive.length > 0 ? cfg.alwaysActive : [];
-  const alwaysActive = new Set([...DEFAULT_ALWAYS_ACTIVE, ...configured]);
-  return { pi, alwaysActive, activated: new Set(), knownTools: new Map() };
+  const disabled = new Set(cfg.disabled ?? []);
+  const alwaysActive = new Set(
+    [...DEFAULT_ALWAYS_ACTIVE, ...configured].filter((name) => !disabled.has(name)),
+  );
+  return { pi, alwaysActive, disabled, activated: new Set(), knownTools: new Map() };
 }
 
 function refreshKnownTools(state: LazyToolsState): void {
@@ -83,6 +87,9 @@ function buildStatusText(state: LazyToolsState): string {
   const lazyTools = [...state.activated].filter((name) => !state.alwaysActive.has(name));
   const lines: string[] = [];
   lines.push(`Active tools (${activeTools.length}): ${activeTools.join(", ") || "(none)"}`);
+  if (state.disabled.size > 0) {
+    lines.push(`Disabled tools: ${[...state.disabled].join(", ")}`);
+  }
   if (lazyTools.length > 0) {
     lines.push(`Lazily activated this session: ${lazyTools.join(", ")}`);
   }
@@ -104,7 +111,7 @@ function findMatchingTools(state: LazyToolsState, query: string): ToolInfo[] {
   const normalizedQuery = query.trim().toLowerCase();
   const terms = searchTerms(normalizedQuery);
   return [...state.knownTools.values()]
-    .filter((tool) => !state.alwaysActive.has(tool.name))
+    .filter((tool) => !state.alwaysActive.has(tool.name) && !state.disabled.has(tool.name))
     .map((tool) => {
       const name = tool.name.toLowerCase().replace(/[_-]+/g, " ");
       const description = (tool.description ?? "").toLowerCase();
@@ -120,12 +127,20 @@ function findMatchingTools(state: LazyToolsState, query: string): ToolInfo[] {
     .map(({ tool }) => tool);
 }
 
-function activateTools(state: LazyToolsState, names: string[]): { activated: string[]; missing: string[] } {
+function activateTools(
+  state: LazyToolsState,
+  names: string[],
+): { activated: string[]; missing: string[]; disabled: string[] } {
   const activated: string[] = [];
   const missing: string[] = [];
+  const disabled: string[] = [];
   for (const name of names) {
     const normalized = name.trim();
     if (!normalized) continue;
+    if (state.disabled.has(normalized)) {
+      disabled.push(normalized);
+      continue;
+    }
     if (!state.knownTools.has(normalized)) {
       missing.push(normalized);
       continue;
@@ -136,7 +151,7 @@ function activateTools(state: LazyToolsState, names: string[]): { activated: str
     activated.push(normalized);
   }
   applyActiveTools(state);
-  return { activated, missing };
+  return { activated, missing, disabled };
 }
 
 /**
@@ -161,7 +176,9 @@ function applyActiveTools(state: LazyToolsState): void {
   // Defensive: keep the proxy even if getAllTools() ever stops listing it.
   const active = [...new Set([PROXY_TOOL_NAME, ...state.alwaysActive, ...state.activated])];
   const known = new Set(state.knownTools.keys());
-  const valid = active.filter((name) => known.has(name) || name === PROXY_TOOL_NAME);
+  const valid = active.filter(
+    (name) => !state.disabled.has(name) && (known.has(name) || name === PROXY_TOOL_NAME),
+  );
   state.pi.setActiveTools(valid);
 }
 
@@ -237,7 +254,7 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig):
         return buildToolResult(state, buildStatusText(state));
       }
       if (params.activate && params.activate.length > 0) {
-        const { activated, missing } = activateTools(state, params.activate);
+        const { activated, missing, disabled } = activateTools(state, params.activate);
         const parts: string[] = [];
         if (activated.length > 0) {
           parts.push(`Activated: ${activated.join(", ")} (available next turn)`);
@@ -249,9 +266,15 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig):
         } else {
           parts.push("Nothing new activated.");
         }
+        if (disabled.length > 0) {
+          parts.push(`Disabled tool names (not activatable): ${disabled.join(", ")}`);
+        }
         if (missing.length > 0) {
           parts.push(`Unknown tool names (not registered): ${missing.join(", ")}`);
-          const known = [...state.knownTools.values()].map((t) => t.name).join(", ");
+          const known = [...state.knownTools.values()]
+            .filter((tool) => !state.disabled.has(tool.name))
+            .map((t) => t.name)
+            .join(", ");
           parts.push(`Known tools: ${known}`);
         }
         parts.push("");
@@ -298,12 +321,14 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig):
           : `No deactivated tools match "${rest}".`;
       } else if (sub === "activate" && rest) {
         const names = rest.split(",").map((s) => s.trim()).filter(Boolean);
-        const { activated, missing } = activateTools(state, names);
+        const { activated, missing, disabled } = activateTools(state, names);
         msg = activated.length > 0
           ? `Activated: ${activated.join(", ")} (next turn)`
-          : missing.length > 0
-            ? `Unknown tools: ${missing.join(", ")}`
-            : "Nothing new activated.";
+          : disabled.length > 0
+            ? `Disabled tools: ${disabled.join(", ")}`
+            : missing.length > 0
+              ? `Unknown tools: ${missing.join(", ")}`
+              : "Nothing new activated.";
       } else if (sub === "reset") {
         state.activated.clear();
         applyActiveTools(state);
@@ -334,11 +359,16 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig):
       if (!state) {
         state = createState(pi, cfg);
       }
-      // reconcile:每次都按当前配置重建 alwaysActive(合并语义,不能删核心工具),
-      // 并清掉已不存在工具的会话激活。配置变更(alwaysActive/enabled)在
-      // session_start(以及 index.ts 的 reload)时生效,无需重启。
+      // reconcile:每次都按当前配置重建 alwaysActive/disabled，并清掉已不存在
+      // 或已禁用的会话激活。配置变更在 session_start(以及 index.ts 的 reload)
+      // 时生效,无需重启。
+      state.disabled = new Set(cfg.disabled ?? []);
+      const disabled = state.disabled;
       const configured = cfg.alwaysActive && cfg.alwaysActive.length > 0 ? cfg.alwaysActive : [];
-      state.alwaysActive = new Set([...DEFAULT_ALWAYS_ACTIVE, ...configured]);
+      state.alwaysActive = new Set(
+        [...DEFAULT_ALWAYS_ACTIVE, ...configured].filter((name) => !disabled.has(name)),
+      );
+      state.activated.clear();
       refreshKnownTools(state);
       const known = new Set(state.knownTools.keys());
       for (const name of [...state.activated]) {
