@@ -232,10 +232,6 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig):
         activate: Type.Optional(Type.Array(Type.String({ description: "Tool names to activate for this session" }))),
         reset: Type.Optional(Type.Boolean({ description: "Reset to only the always-active tool set (removes lazy activations)" })),
       }),
-      // 显式 required 数组:全可选 schema 会被 TypeBox 省略 required 键,OpenAI
-      // Responses 系上游会把缺失的 required 转成 null 并拒绝("Invalid schema
-      // for function 'lazy': None is not of type 'array'")。
-      required: [],
     },
     async execute(
       _toolCallId: string,

@@ -16,12 +16,33 @@ pi 的缓存优化栈扩展:通过保持请求结构稳定,帮助中继(DeepSeek
 
 ## 安装
 
-本地扩展目录方式(直接使用):
+本项目已发布为 npm 包，推荐通过 Pi package manager 安装:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-git clone https://github.com/awoaCrim/pi-cache-stack.git ~/.pi/agent/extensions/cache-stack
+pi install npm:pi-cache-stack
 ```
+
+Pi 会读取包内 `package.json` 的 `pi.extensions` 配置并自动加载扩展入口 `index.ts`。如果需要固定版本，可以安装指定版本:
+
+```bash
+pi install npm:pi-cache-stack@0.3.0
+```
+
+常用管理命令:
+
+```bash
+pi update npm:pi-cache-stack
+pi remove npm:pi-cache-stack
+```
+
+如果之前通过 Pi 安装过 Git 版本，先迁移到 npm 版本:
+
+```bash
+pi remove git:github.com/awoaCrim/pi-cache-stack
+pi install npm:pi-cache-stack
+```
+
+如果之前直接通过 `git clone` 使用本扩展，请删除旧的本地扩展目录 `~/.pi/agent/extensions/cache-stack`，避免同一扩展被重复加载。安装或切换后执行 `/reload`，必要时重启 Pi。
 
 ## 配置
 
@@ -57,11 +78,21 @@ git clone https://github.com/awoaCrim/pi-cache-stack.git ~/.pi/agent/extensions/
 
 ```bash
 npm install --ignore-scripts
-npm test          # node --test(strip-types)
 npm run typecheck # tsc --noEmit(针对官方 pi 0.84.1 类型)
+npm run test      # node --test(strip-types)
 ```
 
 测试覆盖:配置深合并、lazy 激活与配置 reconcile(启用/禁用切换、alwaysActive 变更、激活 guidance)。
+
+## 发布
+
+`prepublishOnly` 会在发布前自动执行 typecheck 和测试:
+
+```bash
+npm publish --access public
+```
+
+如果 npm 账号启用了 2FA，发布时需要输入 OTP，或使用允许绕过发布 2FA 的 granular access token。
 
 ## 与 my-pi fork 的关系
 

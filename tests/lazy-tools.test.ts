@@ -62,6 +62,17 @@ describe("lazy-tools activation", () => {
     assert.ok(!fake.active.includes("ctx_search"));
   });
 
+  it("leaves optional lazy schema normalization to pi-ai", () => {
+    const fake = createFakePi();
+    const cfg = { current: makeCfg() };
+    setupLazyTools(fake.pi, () => cfg.current);
+
+    const def = fake.registered[PROXY_TOOL_NAME] as {
+      parameters?: { required?: unknown };
+    };
+    assert.equal(def.parameters?.required, undefined);
+  });
+
   it("does not activate disabled tools and keeps read available", async () => {
     const fake = createFakePi();
     const cfg = { current: makeCfg({ alwaysActive: ["fffind", "ffgrep"], disabled: ["find", "grep"] }) };
