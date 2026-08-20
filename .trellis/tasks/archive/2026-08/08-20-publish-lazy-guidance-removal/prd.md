@@ -37,12 +37,12 @@ Release the completed automatic-lazy-guidance removal as `pi-cache-stack@0.4.1`,
 - [x] `npm test` passes with all tests successful.
 - [x] `git diff --check` passes.
 - [x] `npm pack --dry-run` contains only the expected package files.
-- [ ] The release commit is pushed to `origin/main`, with no Git tag created.
-- [ ] `npm publish --access public` succeeds for `pi-cache-stack@0.4.1`.
-- [ ] `npm view pi-cache-stack version` returns `0.4.1` with TLS verification enabled.
-- [ ] `pi update npm:pi-cache-stack` succeeds without updating unrelated packages.
-- [ ] The installed local package version is exactly `0.4.1`.
-- [ ] No credential is persisted and unrelated untracked files remain untouched.
+- [x] The release commit is pushed to `origin/main`, with no Git tag created.
+- [x] `npm publish --access public` succeeds for `pi-cache-stack@0.4.1`.
+- [x] `npm view pi-cache-stack version` returns `0.4.1` with TLS verification enabled.
+- [x] `pi update npm:pi-cache-stack` succeeds without updating unrelated packages.
+- [x] The installed local package version is exactly `0.4.1`.
+- [x] No credential is persisted and unrelated untracked files remain untouched.
 
 ## Out of Scope
 
