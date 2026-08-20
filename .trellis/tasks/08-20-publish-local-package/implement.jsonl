@@ -1,0 +1,2 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Defines required type-check, test, package safety, and graceful-failure checks before release."}
+{"file":".trellis/spec/frontend/directory-structure.md","reason":"Defines package files, flat source layout, and dependency constraints relevant to npm packaging."}
