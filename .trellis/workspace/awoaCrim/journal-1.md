@@ -26,3 +26,24 @@ Initialized Trellis for pi-cache-stack, populated full project spec documentatio
 ### Status
 
 [OK] **Completed**
+
+
+## Session 2: Model-aware lazy tool catalog
+
+**Date**: 2026-08-20
+**Task**: Model-aware lazy tool catalog
+**Branch**: `main`
+
+### Summary
+
+Added a stable system-prompt catalog for lazy-loadable tools, model-specific lazy policy overrides, fail-open configuration normalization, lifecycle reconciliation fixes, documentation, specs, and regression coverage. Type checking and all 22 tests pass.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f34a343` | (see git log) |
+
+### Status
+
+[OK] **Completed**
