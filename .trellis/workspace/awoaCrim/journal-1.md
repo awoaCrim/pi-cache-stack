@@ -68,3 +68,24 @@ Published pi-cache-stack 0.4.0 to npm with ephemeral authentication, verified th
 ### Status
 
 [OK] **Completed**
+
+
+## Session 4: Remove automatic lazy guidance
+
+**Date**: 2026-08-20
+**Task**: Remove automatic lazy guidance
+**Branch**: `main`
+
+### Summary
+
+Removed the lazy proxy's automatic promptGuidelines and Web/shell selection policy while preserving the stable catalog and activated-tool guidance; updated tests, README, and spec.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a33c699` | (see git log) |
+
+### Status
+
+[OK] **Completed**
