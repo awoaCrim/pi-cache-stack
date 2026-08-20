@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { setupLazyTools, PROXY_TOOL_NAME } from "../lazy-tools.ts";
-import type { LazyToolsConfig } from "../config.ts";
+import { buildLazyToolCatalog, setupLazyTools, PROXY_TOOL_NAME } from "../lazy-tools.ts";
+import type { EffectiveLazyToolsConfig } from "../config.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 interface FakeTool {
@@ -46,8 +46,14 @@ function createFakePi() {
   };
 }
 
-function makeCfg(overrides: Partial<LazyToolsConfig> = {}): LazyToolsConfig {
-  return { enabled: true, alwaysActive: [], ...overrides };
+function makeCfg(overrides: Partial<EffectiveLazyToolsConfig> = {}): EffectiveLazyToolsConfig {
+  return {
+    enabled: true,
+    alwaysActive: [],
+    disabled: [],
+    showCatalogInPrompt: true,
+    ...overrides,
+  };
 }
 
 describe("lazy-tools activation", () => {
@@ -93,6 +99,63 @@ describe("lazy-tools activation", () => {
     assert.match(text, /Disabled tool names/);
     assert.ok(!fake.active.includes("find"));
     assert.ok(!fake.active.includes("grep"));
+  });
+
+  it("keeps lazily activated tools across later agent runs", async () => {
+    const fake = createFakePi();
+    const cfg = { current: makeCfg() };
+    const hooks = setupLazyTools(fake.pi, () => cfg.current);
+    hooks.onSessionStart();
+    const def = fake.registered[PROXY_TOOL_NAME] as {
+      execute: (id: string, params: { activate?: string[] }, ...rest: unknown[]) => Promise<{ content: { type: string; text: string }[] }>;
+    };
+
+    await def.execute("call_1", { activate: ["ctx_search"] });
+    hooks.onBeforeAgentStart();
+
+    assert.ok(fake.active.includes("ctx_search"));
+  });
+
+  it("builds a stable prompt catalog for lazy-loadable tools and omits disabled tools", () => {
+    const fake = createFakePi();
+    const catalog = buildLazyToolCatalog(
+      fake.pi,
+      makeCfg({ alwaysActive: ["ctx_search"], disabled: ["ctx_purge"] }),
+    );
+
+    assert.match(catalog ?? "", /fffind/);
+    assert.doesNotMatch(catalog ?? "", /ctx_search/);
+    assert.doesNotMatch(catalog ?? "", /ctx_purge/);
+    assert.doesNotMatch(catalog ?? "", /bash/);
+  });
+
+  it("keeps catalog bytes stable when a lazy tool is activated", async () => {
+    const fake = createFakePi();
+    const cfg = { current: makeCfg() };
+    const hooks = setupLazyTools(fake.pi, () => cfg.current);
+    hooks.onSessionStart();
+    const before = buildLazyToolCatalog(fake.pi, cfg.current);
+    const def = fake.registered[PROXY_TOOL_NAME] as {
+      execute: (id: string, params: { activate?: string[] }, ...rest: unknown[]) => Promise<unknown>;
+    };
+
+    await def.execute("call_1", { activate: ["ctx_search"] });
+
+    assert.equal(buildLazyToolCatalog(fake.pi, cfg.current), before);
+  });
+
+  it("can hide the catalog without disabling lazy activation", async () => {
+    const fake = createFakePi();
+    const cfg = { current: makeCfg({ showCatalogInPrompt: false }) };
+    const hooks = setupLazyTools(fake.pi, () => cfg.current);
+    hooks.onSessionStart();
+    const def = fake.registered[PROXY_TOOL_NAME] as {
+      execute: (id: string, params: { activate?: string[] }, ...rest: unknown[]) => Promise<unknown>;
+    };
+
+    assert.equal(buildLazyToolCatalog(fake.pi, cfg.current), undefined);
+    await def.execute("call_1", { activate: ["ctx_search"] });
+    assert.ok(fake.active.includes("ctx_search"));
   });
 
   it("activates tools via the lazy tool and includes guidance in the result", async () => {
@@ -157,6 +220,26 @@ describe("lazy-tools activation", () => {
     assert.ok(fake.active.includes("ctx_purge")); // 全量恢复
     assert.ok(fake.active.includes("ctx_search"));
     assert.ok(fake.active.includes("bash"));
+  });
+
+  it("applies a changed model policy without clearing still-eligible activations", async () => {
+    const fake = createFakePi();
+    const cfg = { current: makeCfg() };
+    const hooks = setupLazyTools(fake.pi, () => cfg.current);
+    hooks.onSessionStart();
+    const def = fake.registered[PROXY_TOOL_NAME] as {
+      execute: (id: string, params: { activate?: string[] }, ...rest: unknown[]) => Promise<unknown>;
+    };
+    await def.execute("call_1", { activate: ["ctx_search"] });
+
+    cfg.current = makeCfg({ alwaysActive: ["fffind"] });
+    hooks.onModelChange();
+    assert.ok(fake.active.includes("ctx_search"));
+    assert.ok(fake.active.includes("fffind"));
+
+    cfg.current = makeCfg({ disabled: ["ctx_search"] });
+    hooks.onModelChange();
+    assert.ok(!fake.active.includes("ctx_search"));
   });
 
   it("is idempotent across repeated session starts", () => {

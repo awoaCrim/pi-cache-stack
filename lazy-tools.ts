@@ -15,7 +15,7 @@
 import { Type } from "typebox";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_ALWAYS_ACTIVE, type LazyToolsConfig } from "./config.ts";
+import { DEFAULT_ALWAYS_ACTIVE, type EffectiveLazyToolsConfig } from "./config.ts";
 
 export const PROXY_TOOL_NAME = "lazy";
 
@@ -29,19 +29,49 @@ interface LazyToolsState {
   knownTools: Map<string, ToolInfo>;
 }
 
-function createState(pi: ExtensionAPI, cfg: LazyToolsConfig): LazyToolsState {
+export function getAlwaysActiveTools(cfg: EffectiveLazyToolsConfig): Set<string> {
   // Merge configured always-active tools with the defaults rather than replacing
   // them: a config like {"alwaysActive": ["bash"]} must not silently drop
   // read/write/edit. Explicit disabled entries are removed afterward.
   const configured = cfg.alwaysActive && cfg.alwaysActive.length > 0 ? cfg.alwaysActive : [];
   const disabled = new Set(cfg.disabled ?? []);
-  const alwaysActive = new Set(
+  return new Set(
     [...DEFAULT_ALWAYS_ACTIVE, ...configured].filter((name) => !disabled.has(name)),
   );
-  return { pi, alwaysActive, disabled, activated: new Set(), knownTools: new Map() };
+}
+
+function createState(pi: ExtensionAPI, cfg: EffectiveLazyToolsConfig): LazyToolsState {
+  return {
+    pi,
+    alwaysActive: getAlwaysActiveTools(cfg),
+    disabled: new Set(cfg.disabled ?? []),
+    activated: new Set(),
+    knownTools: new Map(),
+  };
+}
+
+/**
+ * Build a compact, activation-independent catalog for the system prompt.
+ * It intentionally lists the whole lazy pool, including tools already activated
+ * this session, so activation does not change the prompt prefix.
+ */
+export function buildLazyToolCatalog(
+  pi: Pick<ExtensionAPI, "getAllTools">,
+  cfg: EffectiveLazyToolsConfig,
+): string | undefined {
+  if (!cfg.enabled || !cfg.showCatalogInPrompt) return undefined;
+  const alwaysActive = getAlwaysActiveTools(cfg);
+  const disabled = new Set(cfg.disabled ?? []);
+  const names = [...new Set(pi.getAllTools()
+    .map((tool) => tool.name)
+    .filter((name) => name !== PROXY_TOOL_NAME && !alwaysActive.has(name) && !disabled.has(name)))]
+    .sort();
+  if (names.length === 0) return undefined;
+  return `Lazy-loadable tools (schemas are inactive until enabled): ${names.join(", ")}. Use lazy({ search: "..." }) for discovery or lazy({ activate: ["name"] }) to enable one.`;
 }
 
 function refreshKnownTools(state: LazyToolsState): void {
+  state.knownTools.clear();
   for (const tool of state.pi.getAllTools()) {
     state.knownTools.set(tool.name, tool);
   }
@@ -191,6 +221,8 @@ function buildToolResult(state: LazyToolsState, text: string): AgentToolResult<u
 
 export interface LazyToolsHooks {
   onSessionStart(): void;
+  onBeforeAgentStart(): void;
+  onModelChange(): void;
   onToolExecutionEnd(): void;
   onReset(): void;
 }
@@ -199,7 +231,7 @@ export interface LazyToolsHooks {
  * 注册 lazy 工具 + lazy 命令,返回生命周期钩子(index.ts 按管线顺序调用)。
  * lazyTools.enabled=false 时:不接管活跃工具集(保持 Pi 默认全量),lazy 调用给出提示。
  */
-export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig): LazyToolsHooks {
+export function setupLazyTools(pi: ExtensionAPI, getCfg: () => EffectiveLazyToolsConfig): LazyToolsHooks {
   let state: LazyToolsState | null = null;
 
   const ensureState = (): LazyToolsState => {
@@ -338,42 +370,44 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => LazyToolsConfig):
     },
   });
 
+  const reconcile = (resetActivated: boolean): void => {
+    const cfg = getCfg();
+    if (!state) state = createState(pi, cfg);
+
+    refreshKnownTools(state);
+    if (!cfg.enabled) {
+      if (resetActivated) state.activated.clear();
+      // disabled is an activation policy, not a permission boundary; when lazy
+      // mode is off, restore Pi's complete registered tool set.
+      state.pi.setActiveTools([...state.knownTools.keys()]);
+      return;
+    }
+
+    state.disabled = new Set(cfg.disabled ?? []);
+    state.alwaysActive = getAlwaysActiveTools(cfg);
+    if (resetActivated) state.activated.clear();
+
+    const known = new Set(state.knownTools.keys());
+    for (const name of [...state.activated]) {
+      if (!known.has(name) || state.disabled.has(name) || state.alwaysActive.has(name)) {
+        state.activated.delete(name);
+      }
+    }
+    applyActiveTools(state);
+  };
+
   return {
     onSessionStart(): void {
-      const cfg = getCfg();
-      if (!cfg.enabled) {
-        // 从启用切到禁用:恢复全量工具集(pi 默认行为),而不是继续停留在裁剪集。
-        if (state) {
-          refreshKnownTools(state);
-          state.activated.clear();
-          state.alwaysActive = new Set(state.knownTools.keys());
-          applyActiveTools(state);
-        }
-        // 从未启用过:pi 默认就是全量激活,无需干预。
-        return;
-      }
-      if (!state) {
-        state = createState(pi, cfg);
-      }
-      // reconcile:每次都按当前配置重建 alwaysActive/disabled，并清掉已不存在
-      // 或已禁用的会话激活。配置变更在 session_start(以及 index.ts 的 reload)
-      // 时生效,无需重启。
-      state.disabled = new Set(cfg.disabled ?? []);
-      const disabled = state.disabled;
-      const configured = cfg.alwaysActive && cfg.alwaysActive.length > 0 ? cfg.alwaysActive : [];
-      state.alwaysActive = new Set(
-        [...DEFAULT_ALWAYS_ACTIVE, ...configured].filter((name) => !disabled.has(name)),
-      );
-      state.activated.clear();
-      refreshKnownTools(state);
-      const known = new Set(state.knownTools.keys());
-      for (const name of [...state.activated]) {
-        if (!known.has(name)) state.activated.delete(name);
-      }
-      applyActiveTools(state);
+      reconcile(true);
+    },
+    onBeforeAgentStart(): void {
+      reconcile(false);
+    },
+    onModelChange(): void {
+      reconcile(false);
     },
     onToolExecutionEnd(): void {
-      if (state) refreshKnownTools(state);
+      reconcile(false);
     },
     onReset(): void {
       state = null;

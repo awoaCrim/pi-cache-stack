@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/hook-guidelines.md","reason":"Verify lifecycle handlers remain idempotent and prompt filtering stays synchronous."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Verify effective policy resolution and session activation reconciliation."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Verify tests, graceful degradation, and prefix-cache stability."}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Verify strict TypeScript compatibility and no unsafe API contracts."}

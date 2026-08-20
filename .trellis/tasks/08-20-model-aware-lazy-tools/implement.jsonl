@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/hook-guidelines.md","reason":"Defines lifecycle and synchronous system-prompt filter contracts for implementation."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Defines configuration merge, model override, and activation reconciliation semantics."}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Defines strict TypeScript and Pi extension typing requirements."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Defines cache-stability constraints and native test conventions."}

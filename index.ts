@@ -7,8 +7,9 @@
  *
  * system prompt 的稳定性(前缀第 1 段)由 pi 本体的 system_prompt_filter
  * 机制保证(需要 fork:见 my-pi 的 registerSystemPromptFilter 实现):
- * 本扩展注册一个过滤器,只把常驻工具的 snippets/guidelines 放进 system
- * prompt → 动态激活/停用工具永远不会改变 system prompt → 前缀恒定。
+ * 本扩展注册一个过滤器,只把常驻工具的 snippets/guidelines 和完整 lazy
+ * 工具名 catalog 放进 system prompt。catalog 不随激活状态变化，因此动态
+ * 激活/停用工具不会改变 system prompt → 前缀恒定。
  *
  * 生命周期管线(顺序由 pi 的事件保证,本文件显式编排):
  *   session_start            → 激活常驻工具(lazy-tools)
@@ -20,19 +21,38 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadConfig, DEFAULT_ALWAYS_ACTIVE, type CacheStackConfig } from "./config.ts";
-import { setupLazyTools, PROXY_TOOL_NAME } from "./lazy-tools.ts";
+import {
+  loadConfig,
+  resolveLazyToolsConfig,
+  type CacheStackConfig,
+  type EffectiveLazyToolsConfig,
+  type ModelIdentity,
+} from "./config.ts";
+import {
+  buildLazyToolCatalog,
+  getAlwaysActiveTools,
+  setupLazyTools,
+  PROXY_TOOL_NAME,
+} from "./lazy-tools.ts";
 
 export default function cacheStack(pi: ExtensionAPI): void {
-  // 配置在 session_start 时惰性重载(编辑无需重启);其余事件用当前值。
+  // 配置在 session_start 时惰性重载(编辑无需重启);模型切换时重新解析
+  // modelOverrides，不需要重启或新建会话。
   let cfg: CacheStackConfig = loadConfig();
+  let currentModel: ModelIdentity | undefined;
+  let effectiveLazyTools: EffectiveLazyToolsConfig = resolveLazyToolsConfig(cfg.lazyTools);
 
-  const lazyTools = setupLazyTools(pi, () => cfg.lazyTools);
+  const setCurrentModel = (model: ModelIdentity | undefined): void => {
+    currentModel = model ? { provider: model.provider, id: model.id } : undefined;
+    effectiveLazyTools = resolveLazyToolsConfig(cfg.lazyTools, currentModel);
+  };
+
+  const lazyTools = setupLazyTools(pi, () => effectiveLazyTools);
 
   // system-prompt 过滤器(pi 本体 registerSystemPromptFilter,同步、每次重建
-  // prompt 时调用):只保留常驻工具的 snippets/guidelines,动态激活的工具只
-  // 通过请求体的 tools 数组暴露 → system prompt 与激活集无关 → 前缀第 1 段
-  // 恒定。
+  // prompt 时调用):保留常驻工具的 snippets/guidelines，并附加完整 lazy pool
+  // 的稳定名称 catalog。动态激活工具的详细说明仍通过工具 schema / 激活结果
+  // 暴露 → system prompt 与激活集无关 → 前缀第 1 段恒定。
   // 防御:旧版 pi(未装含该 API 的 fork)上此方法不存在,跳过并告警。
   const api = pi as ExtensionAPI & {
     registerSystemPromptFilter?(filter: (event: {
@@ -40,13 +60,17 @@ export default function cacheStack(pi: ExtensionAPI): void {
       toolNames: string[];
       toolSnippets: Record<string, string>;
       toolGuidelines: Record<string, string[]>;
-    }) => { toolSnippets?: Record<string, string>; toolGuidelines?: string[] } | undefined | void): void;
+    }) => {
+      toolSnippets?: Record<string, string>;
+      toolGuidelines?: string[];
+      selectedTools?: string[];
+    } | undefined | void): void;
   };
   if (typeof api.registerSystemPromptFilter === "function") {
     api.registerSystemPromptFilter((event) => {
-      if (!cfg.lazyTools.enabled) return undefined;
-      const disabled = new Set(cfg.lazyTools.disabled ?? []);
-      const keep = new Set([PROXY_TOOL_NAME, ...DEFAULT_ALWAYS_ACTIVE, ...(cfg.lazyTools.alwaysActive ?? [])]);
+      if (!effectiveLazyTools.enabled) return undefined;
+      const disabled = new Set(effectiveLazyTools.disabled ?? []);
+      const keep = new Set([PROXY_TOOL_NAME, ...getAlwaysActiveTools(effectiveLazyTools)]);
       const toolSnippets: Record<string, string> = {};
       for (const [name, snippet] of Object.entries(event.toolSnippets)) {
         if (keep.has(name) && !disabled.has(name)) toolSnippets[name] = snippet;
@@ -55,6 +79,9 @@ export default function cacheStack(pi: ExtensionAPI): void {
       for (const [name, guidelines] of Object.entries(event.toolGuidelines)) {
         if (keep.has(name) && !disabled.has(name)) toolGuidelines.push(...guidelines);
       }
+      const lazyCatalog = buildLazyToolCatalog(pi, effectiveLazyTools);
+      if (lazyCatalog) toolGuidelines.push(lazyCatalog);
+
       // selectedTools:让 buildSystemPrompt 的 hasBash/hasGrep 等派生判断与
       // 可见工具一致(隐藏的工具不会留下"幽灵分支"影响 prompt 引导)。
       return {
@@ -70,19 +97,26 @@ export default function cacheStack(pi: ExtensionAPI): void {
     );
   }
 
-  pi.on("session_start", async () => {
-    // 每次新会话重载配置:lazyTools.enabled/alwaysActive 的修改在下一次
-    // session_start 生效(配合 lazy-tools 的 reconcile,无需重启)。
+  pi.on("session_start", async (_event, ctx) => {
+    // 每次新会话重载配置；模型规则按当前 ctx.model 解析。
     cfg = loadConfig();
+    setCurrentModel(ctx.model);
     // pi 保证 session_start 先于首个 before_agent_start。
     lazyTools.onSessionStart();
   });
 
-  pi.on("before_agent_start", () => {
+  pi.on("model_select", (event) => {
+    // 模型切换后立即应用该模型的 lazy policy；激活过的工具只在新 policy
+    // 禁用/隐藏它们时才被移除。
+    setCurrentModel(event.model);
+    lazyTools.onModelChange();
+  });
+
+  pi.on("before_agent_start", (_event, ctx) => {
     // 保险:某些启动路径(reload/重启后 resume)session_start 可能没送达扩展。
-    // before_agent_start 每个 run 必触发,幂等应用激活集,保证请求体 tools[]
-    // 恒为 lazy 激活集而不是全量注册集。
-    lazyTools.onSessionStart();
+    // 这里只 reconcile，不清空会话内已激活工具。
+    setCurrentModel(ctx.model);
+    lazyTools.onBeforeAgentStart();
   });
 
   pi.on("tool_execution_end", () => {

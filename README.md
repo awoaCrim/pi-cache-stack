@@ -7,7 +7,7 @@ pi 的缓存优化栈扩展:通过保持请求结构稳定,帮助中继(DeepSeek
 
 本扩展**不实现或存储模型缓存**,也不接管 pi 的压缩流程;实际缓存仍由 Provider 负责。它只通过"请求结构稳定性"间接提高前缀复用概率。
 
-`lazyTools.disabled` 是工具激活限制，不是注册表删除；被禁用工具仍可能被其他诊断接口列出，但不会出现在 active tools、system prompt 或 lazy 激活结果中。
+`lazyTools.disabled` 是工具激活限制，不是注册表删除；被禁用工具仍可能被其他诊断接口列出，但不会出现在 active tools、system prompt 或 lazy 激活结果中。默认情况下，system prompt 会用一行稳定的 catalog 列出所有可 lazy 激活的工具名；catalog 不随会话内激活状态变化，因此不会破坏前缀稳定性。
 
 ## 前提与降级
 
@@ -56,14 +56,33 @@ pi install npm:pi-cache-stack
     // disabled 中的工具不会激活，也不能通过 lazy 激活
     "alwaysActive": [],
     // 注册但不允许激活的工具
-    "disabled": []
+    "disabled": [],
+    // 在稳定 system prompt 中列出可 lazy 激活的工具名
+    "showCatalogInPrompt": true,
+    // 按模型覆盖 lazy policy；支持 * 和 ? 通配符
+    // 含 / 的 pattern 匹配 provider/model-id，否则只匹配 model-id
+    // 多条规则命中时按声明顺序合并，后面的字段优先
+    "modelOverrides": {
+      "anthropic/claude-haiku-*": {
+        "enabled": false
+      },
+      "openai/gpt-5.6-*": {
+        "enabled": true,
+        "alwaysActive": ["mcp"],
+        "disabled": [],
+        "showCatalogInPrompt": true
+      }
+    }
   }
 }
 ```
 
-配置变更在 `session_start` 时重载:
+配置文件在 `session_start` 时重载:
 - `lazyTools.enabled` 切到 `false` 后,下一次会话恢复 pi 默认全量工具集;
-- `lazyTools.alwaysActive` 和 `lazyTools.disabled` 变更在下一次会话生效(无需重启)。
+- `lazyTools.alwaysActive`、`disabled`、`showCatalogInPrompt` 和 `modelOverrides` 的文件修改在下一次会话生效(无需重启);
+- `showCatalogInPrompt: false` 只隐藏稳定 catalog，不会关闭 lazy 激活；
+- 当前会话切换模型时，会立即重新解析并应用已加载配置中的 `modelOverrides`;
+- model override 的数组字段替换全局对应数组；默认核心工具仍会与最终 `alwaysActive` 合并;
 - `lazyTools.disabled` 中的工具不会进入 active tools，也不能通过 `lazy` 激活；lazy-tools 禁用时恢复 Pi 默认全量工具集。
 
 ## 命令
@@ -71,7 +90,8 @@ pi install npm:pi-cache-stack
 - `/lazy` — 显示 lazy-tools 状态:激活集、请求体开销、如何激活工具
 - `/lazy search <query>` / `/lazy activate <names>` / `/lazy reset`
 - `lazy search` 会把自然语言查询拆词并按名称/描述命中度排序,例如 `web search URL fetch HTTP` 可同时发现 `web_search` 与 `fetch_content`
-- 模型侧通过 `lazy` 工具(search / activate / reset)按需激活工具;激活结果会附上该工具的 description + promptGuidelines(system prompt 为保持前缀稳定只含常驻工具,动态工具的用法说明随激活结果给出)
+- 模型侧通过 `lazy` 工具(search / activate / reset)按需激活工具;system prompt 的稳定 catalog 只列工具名，激活结果会附上该工具的 description + promptGuidelines
+- catalog 始终列出完整 lazy pool（包括本会话中已经激活的工具），而不是实时“未激活集合”；这是为了避免每次激活都改变 system prompt
 - 网页研究或 HTTP(S) URL 抓取应优先使用专用 Web 工具;只有未激活专用工具时才先通过 `lazy` 搜索,而不是直接退回 bash/curl/Python/Node
 
 ## 开发

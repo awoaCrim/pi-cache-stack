@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deepMerge, DEFAULT_CONFIG } from "../config.ts";
+import { deepMerge, DEFAULT_CONFIG, resolveLazyToolsConfig } from "../config.ts";
 
 describe("config deepMerge", () => {
   it("returns base when override is not a record", () => {
@@ -34,6 +34,83 @@ describe("config deepMerge", () => {
   it("DEFAULT_CONFIG loads through deepMerge against an empty override", () => {
     const merged = deepMerge(DEFAULT_CONFIG, {}) as typeof DEFAULT_CONFIG;
     assert.equal(merged.lazyTools.enabled, true);
+    assert.equal(merged.lazyTools.showCatalogInPrompt, true);
     assert.deepEqual(merged.lazyTools.alwaysActive, ["bash", "read", "write", "edit", "ls", "find", "grep"]);
+  });
+});
+
+describe("resolveLazyToolsConfig", () => {
+  it("applies provider/model and bare-id wildcard overrides in declaration order", () => {
+    const resolved = resolveLazyToolsConfig(
+      {
+        enabled: true,
+        alwaysActive: ["bash"],
+        disabled: [],
+        showCatalogInPrompt: true,
+        modelOverrides: {
+          "gpt-*": { alwaysActive: ["mcp"] },
+          "openai/gpt-5.6-*": { enabled: false, showCatalogInPrompt: false },
+        },
+      },
+      { provider: "openai", id: "gpt-5.6-luna" },
+    );
+
+    assert.equal(resolved.enabled, false);
+    assert.equal(resolved.showCatalogInPrompt, false);
+    assert.deepEqual(resolved.alwaysActive, ["mcp"]);
+  });
+
+  it("supports single-character wildcards and case-insensitive provider/model matching", () => {
+    const resolved = resolveLazyToolsConfig(
+      {
+        enabled: true,
+        alwaysActive: ["bash"],
+        disabled: [],
+        showCatalogInPrompt: true,
+        modelOverrides: {
+          "OpenAI/gpt-?.*": { showCatalogInPrompt: false },
+        },
+      },
+      { provider: "openai", id: "gpt-5.x" },
+    );
+
+    assert.equal(resolved.showCatalogInPrompt, false);
+  });
+
+  it("leaves the base policy unchanged when no model rule matches", () => {
+    const resolved = resolveLazyToolsConfig(
+      {
+        enabled: true,
+        alwaysActive: ["bash"],
+        disabled: ["danger"],
+        showCatalogInPrompt: true,
+        modelOverrides: { "anthropic/*": { enabled: false } },
+      },
+      { provider: "openai", id: "gpt-5.6-luna" },
+    );
+
+    assert.equal(resolved.enabled, true);
+    assert.deepEqual(resolved.disabled, ["danger"]);
+  });
+
+  it("fails open for malformed policy fields", () => {
+    const resolved = resolveLazyToolsConfig(
+      {
+        enabled: "yes",
+        alwaysActive: "bash",
+        disabled: ["danger"],
+        showCatalogInPrompt: "yes",
+        modelOverrides: {
+          "openai/*": "invalid",
+          "gpt-*": { disabled: ["ctx_search"] },
+        },
+      } as unknown as Parameters<typeof resolveLazyToolsConfig>[0],
+      { provider: "openai", id: "gpt-5" },
+    );
+
+    assert.equal(resolved.enabled, true);
+    assert.deepEqual(resolved.alwaysActive, ["bash", "read", "write", "edit", "ls", "find", "grep"]);
+    assert.deepEqual(resolved.disabled, ["ctx_search"]);
+    assert.equal(resolved.showCatalogInPrompt, true);
   });
 });
