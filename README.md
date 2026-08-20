@@ -90,9 +90,8 @@ pi install npm:pi-cache-stack
 - `/lazy` — 显示 lazy-tools 状态:激活集、请求体开销、如何激活工具
 - `/lazy search <query>` / `/lazy activate <names>` / `/lazy reset`
 - `lazy search` 会把自然语言查询拆词并按名称/描述命中度排序,例如 `web search URL fetch HTTP` 可同时发现 `web_search` 与 `fetch_content`
-- 模型侧通过 `lazy` 工具(search / activate / reset)按需激活工具;system prompt 的稳定 catalog 只列工具名，激活结果会附上该工具的 description + promptGuidelines
+- 模型侧通过 `lazy` 工具(search / activate / reset)完成工具发现与按需激活;system prompt 的稳定 catalog 只列工具名，激活结果会附上被激活工具自己的 description + promptGuidelines；`lazy` 本身不自动注入额外的工具选择 guidance
 - catalog 始终列出完整 lazy pool（包括本会话中已经激活的工具），而不是实时“未激活集合”；这是为了避免每次激活都改变 system prompt
-- 网页研究或 HTTP(S) URL 抓取应优先使用专用 Web 工具;只有未激活专用工具时才先通过 `lazy` 搜索,而不是直接退回 bash/curl/Python/Node
 
 ## 开发
 

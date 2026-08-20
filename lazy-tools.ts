@@ -250,14 +250,8 @@ export function setupLazyTools(pi: ExtensionAPI, getCfg: () => EffectiveLazyTool
     name: PROXY_TOOL_NAME,
     label: "Lazy Tool Gateway",
     description:
-      "Lazy-load gateway for tools. Pi keeps a small always-active tool set active; larger tools are deactivated to shrink the request body. Use lazy({}) for status, lazy({ search: \"query\" }) to find a tool, or lazy({ activate: [\"name\"] }) to enable tools for the rest of the session. Activating takes effect on the next agent turn. Before falling back to shell code for web research or URL fetching, search for a dedicated tool.",
+      "Lazy-load gateway for tools. Use lazy({}) for status, lazy({ search: \"query\" }) to discover tools, lazy({ activate: [\"name\"] }) to enable tools for the rest of the session, or lazy({ reset: true }) to clear activations. Activating takes effect on the next agent turn.",
     promptSnippet: "Discover and activate lazy-loaded tools",
-    promptGuidelines: [
-      "If a tool you need is not available, call lazy({ search: \"...\" }) to find it.",
-      "For web research or HTTP(S) URL fetching, prefer a dedicated web tool over bash, curl, Python, or Node; if none is active, call lazy({ search: \"web\" }) or lazy({ search: \"fetch\" }) first.",
-      "Activate a tool with lazy({ activate: [\"name\"] }); it becomes available on the next turn.",
-      "Keep the always-active set small to save tokens in the request body.",
-    ],
     parameters: {
       ...Type.Object({
         search: Type.Optional(Type.String({ description: "Search deactivated tools by name or description; omit to list all" })),

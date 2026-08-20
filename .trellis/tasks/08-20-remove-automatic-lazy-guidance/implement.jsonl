@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/index.md","reason":"Extension-level architecture and prefix-cache stability principles."}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"Tool registration and neutral tool-description conventions for lazy-tools.ts."}
+{"file":".trellis/spec/frontend/hook-guidelines.md","reason":"System-prompt filter contract and stable lazy catalog behavior that must remain unchanged."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Native test conventions and prompt/cache stability requirements."}

@@ -22,9 +22,11 @@ session_shutdown         ──> Drop extension-local runtime state
 
 The prompt filter must remain synchronous and activation-independent. It exposes:
 
-1. snippets and guidelines for the `lazy` proxy and effective always-active tools;
+1. the `lazy` proxy snippet plus snippets and guidelines from effective always-active tools;
 2. a compact, stable catalog of the complete lazy-loadable tool-name pool;
 3. a `selectedTools` set consistent with the visible always-active prompt content.
+
+The `lazy` proxy itself must not register `promptGuidelines`; keeping the proxy visible must not implicitly inject domain-specific tool-selection policy.
 
 ```typescript
 api.registerSystemPromptFilter((event) => {
@@ -63,3 +65,31 @@ The catalog must not be the real-time inactive set. It intentionally still lists
 5. **No Volatile Prompt Data**: Never inject timestamps, session IDs, current activation status, or unsorted registry iteration into the stable prompt.
 6. **Optional Fork APIs**: Feature-detect `registerSystemPromptFilter`. If absent, warn and continue; do not block agent startup.
 7. **No Unhandled Rejections**: Any future asynchronous lifecycle work must catch failures internally and preserve fail-open startup behavior.
+
+## Lazy Proxy Guidance Ownership
+
+The `lazy` proxy owns discovery and activation mechanics only. Its registration must not include `promptGuidelines`, and its description must remain neutral rather than prescribing Web, shell, provider, or other domain-specific tool choices.
+
+Tool-owned guidance may still be returned after activation through `describeActivatedTool()`. The stable system-prompt catalog remains limited to discoverable tool names and generic activation syntax.
+
+### Wrong
+
+```typescript
+pi.registerTool({
+  name: "lazy",
+  promptGuidelines: ["Prefer a specific Web tool over shell fetching."],
+});
+```
+
+This policy is injected whenever the always-visible proxy is retained, even when the referenced capability is disabled.
+
+### Correct
+
+```typescript
+pi.registerTool({
+  name: "lazy",
+  description: "Use lazy search, activate, and reset to manage lazy-loaded tools.",
+});
+```
+
+Tests must assert that the proxy has no `promptGuidelines`, its description contains no domain-specific selection policy, and activated tools still return their own guidance.

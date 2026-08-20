@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/index.md","reason":"Check extension architecture and cache-stability invariants."}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"Verify the lazy tool registration remains valid and focused."}
+{"file":".trellis/spec/frontend/hook-guidelines.md","reason":"Verify the prompt filter and stable catalog behavior are preserved."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Run and assess the required typecheck and native test suite."}
