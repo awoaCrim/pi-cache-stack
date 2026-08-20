@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 4
+- **Total Sessions**: 5
 - **Last Active**: 2026-08-20
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~91 | Active |
+| `journal-1.md` | ~112 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 5 | 2026-08-20 | Publish pi-cache-stack 0.4.1 | `722d0a1` | `main` |
 | 4 | 2026-08-20 | Remove automatic lazy guidance | `a33c699` | `main` |
 | 3 | 2026-08-20 | Publish pi-cache-stack 0.4.0 | `059bfe8` | `main` |
 | 2 | 2026-08-20 | Model-aware lazy tool catalog | `f34a343` | `main` |

@@ -89,3 +89,24 @@ Removed the lazy proxy's automatic promptGuidelines and Web/shell selection poli
 ### Status
 
 [OK] **Completed**
+
+
+## Session 5: Publish pi-cache-stack 0.4.1
+
+**Date**: 2026-08-20
+**Task**: Publish pi-cache-stack 0.4.1
+**Branch**: `main`
+
+### Summary
+
+Pushed main, published pi-cache-stack 0.4.1, verified npm latest, and updated the Pi-managed local installation to 0.4.1 without creating a Git tag.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `722d0a1` | (see git log) |
+
+### Status
+
+[OK] **Completed**
